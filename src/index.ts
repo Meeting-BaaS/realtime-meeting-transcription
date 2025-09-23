@@ -1,5 +1,6 @@
 import { MeetingBaasClient } from "./meetingbaas";
 import { TranscriptionProxy } from "./proxy";
+import { proxyConfig } from "./config";
 import { createLogger } from "./utils";
 
 const logger = createLogger("Main");
@@ -16,7 +17,7 @@ function setupGracefulShutdown() {
     // Disconnect from MeetingBaas (remove the bot from the meeting)
     if (meetingBaasClient) {
       logger.info("Telling bot to leave the meeting...");
-      meetingBaasClient.disconnect();
+      await meetingBaasClient.disconnect();
     }
 
     // Close Gladia connections (via proxy)
@@ -45,7 +46,7 @@ async function main() {
     const args = process.argv.slice(2);
     const meetingUrl = args[0] || "https://meet.google.com/your-meeting-id";
     const botName = args[1] || "Transcription Bot";
-    const webhookUrl = args[2] || "ws://localhost:3000"; // Your proxy URL
+    const webhookUrl = args[2] || `ws://localhost:${proxyConfig.port}`; // WebSocket URL for streaming
 
     // Connect the bot to the meeting
     const connected = await meetingBaasClient.connect(
