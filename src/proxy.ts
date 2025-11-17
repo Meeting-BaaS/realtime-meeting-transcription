@@ -181,8 +181,14 @@ class TranscriptionProxy {
 
     // Initialize Gladia session if not already active
     if (!this.isGladiaSessionActive) {
+      logger.info("Initializing Gladia transcription session...");
       this.gladiaClient.initSession().then((success) => {
         this.isGladiaSessionActive = success;
+        if (success) {
+          logger.info("Gladia transcription session ready");
+        } else {
+          logger.error("Failed to initialize Gladia transcription session");
+        }
       });
     }
 

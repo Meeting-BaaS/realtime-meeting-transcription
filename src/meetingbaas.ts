@@ -44,6 +44,17 @@ class MeetingBaasClient {
       const deduplicationKey = this.generateDeduplicationKey(botName);
       logger.info(`Using deduplication key: ${deduplicationKey}`);
 
+      // Convert HTTP/HTTPS URL to WebSocket URL if needed
+      let wsUrl = webhookUrl;
+      if (webhookUrl) {
+        if (webhookUrl.startsWith("https://")) {
+          wsUrl = webhookUrl.replace("https://", "wss://");
+        } else if (webhookUrl.startsWith("http://")) {
+          wsUrl = webhookUrl.replace("http://", "ws://");
+        }
+        logger.info(`Streaming audio to: ${wsUrl}`);
+      }
+
       // Join the meeting using the SDK
       const result = await this.client.joinMeeting({
         bot_name: botName,
@@ -52,8 +63,8 @@ class MeetingBaasClient {
         deduplication_key: deduplicationKey, // Use unique deduplication key
         // Configure streaming to WebSocket
         streaming: {
-          output: webhookUrl, // WebSocket URL for streaming audio output
-          audio_frequency: "24khz", // Audio frequency for streaming
+          output: wsUrl, // WebSocket URL for streaming audio output
+          audio_frequency: "16khz", // Audio frequency for streaming (matches Gladia requirements)
         },
       });
 

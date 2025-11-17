@@ -56,22 +56,27 @@ class GladiaClient {
 
       logger.info(`Gladia session initialized: ${this.sessionId}`);
 
-      // Connect to the WebSocket
-      this.connectWebSocket(wsUrl);
+      // Connect to the WebSocket and wait for it to be ready
+      await this.connectWebSocket(wsUrl);
       return true;
-    } catch (error) {
-      logger.error("Failed to initialize Gladia session:", error);
+    } catch (error: any) {
+      logger.error("Failed to initialize Gladia session:", error.message);
+      if (error.response?.data) {
+        logger.error("Gladia API error details:", JSON.stringify(error.response.data, null, 2));
+      }
       return false;
     }
   }
 
   // Connect to Gladia's WebSocket for real-time transcription
-  private connectWebSocket(url: string) {
-    this.ws = new WebSocket(url);
+  private connectWebSocket(url: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.ws = new WebSocket(url);
 
-    this.ws.on("open", () => {
-      logger.info("Connected to Gladia WebSocket");
-    });
+      this.ws.on("open", () => {
+        logger.info("Connected to Gladia WebSocket");
+        resolve();
+      });
 
     this.ws.on("message", (data) => {
       try {
@@ -103,10 +108,12 @@ class GladiaClient {
 
     this.ws.on("error", (error) => {
       logger.error("Gladia WebSocket error:", error);
+      reject(error);
     });
 
     this.ws.on("close", () => {
       logger.info("Gladia WebSocket connection closed");
+    });
     });
   }
 
