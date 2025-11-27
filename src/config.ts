@@ -9,7 +9,7 @@ export const botConfig = {
   host: process.env.BOT_HOST || "0.0.0.0",
   port: parseInt(process.env.BOT_PORT || "8766"),
   audioParams: {
-    sampleRate: 24000,
+    sampleRate: 16000,
   },
 };
 
@@ -19,8 +19,12 @@ export const proxyConfig = {
   port: parseInt(process.env.PROXY_PORT || "8765"),
   botUrl: process.env.BOT_URL || "ws://localhost:8766",
   audioParams: {
-    sampleRate: 24000,
+    sampleRate: 16000,
     channels: 1,
+  },
+  recording: {
+    enabled: process.env.ENABLE_AUDIO_RECORDING === "true",
+    outputDir: process.env.AUDIO_OUTPUT_DIR || "./recordings",
   },
 };
 

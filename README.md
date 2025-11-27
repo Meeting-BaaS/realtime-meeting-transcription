@@ -9,6 +9,7 @@ A Node.js application that connects to video meetings (Zoom, Google Meet, Micros
 - Joins video conferences as a bot participant
 - Streams audio from meetings to Gladia for real-time transcription
 - Logs transcriptions with speaker detection
+- Optional audio recording: Save meeting audio to WAV files
 - Provides clean shutdown with proper resource cleanup
 - Supports multiple video conferencing platforms through MeetingBaas
 
@@ -35,12 +36,21 @@ A Node.js application that connects to video meetings (Zoom, Google Meet, Micros
    pnpm install
    ```
 
-3. Create a `.env` file in the root directory:
+3. Create a `.env` file in the root directory (or copy from `.env.example`):
    ```
    MEETING_BAAS_API_KEY=your_meetingbaas_api_key
    GLADIA_API_KEY=your_gladia_api_key
    PROXY_HOST=0.0.0.0
    PROXY_PORT=3000
+
+   # Optional: Enable audio recording
+   ENABLE_AUDIO_RECORDING=false
+   AUDIO_OUTPUT_DIR=./recordings
+
+   # Optional: Choose MeetingBaas environment
+   # Production (default): https://api.meetingbaas.com
+   # Pre-production: https://api.pre-prod-meetingbaas.com
+   MEETING_BAAS_API_URL=https://api.meetingbaas.com
    ```
 
 ## Usage
@@ -103,6 +113,43 @@ The application can be configured via the `src/config.ts` file or environment va
 - `PROXY_HOST`: Host for the proxy server (default: 0.0.0.0)
 - `PROXY_PORT`: Port for the proxy server (default: 3000)
 - `MEETING_BAAS_API_URL`: MeetingBaas API URL (default: https://api.meetingbaas.com)
+- `ENABLE_AUDIO_RECORDING`: Enable audio recording (default: false)
+- `AUDIO_OUTPUT_DIR`: Directory where audio recordings will be saved (default: ./recordings)
+
+### Environment Selection
+
+To switch between MeetingBaas environments, update the `MEETING_BAAS_API_URL` in your `.env` file:
+
+**Production (default):**
+```
+MEETING_BAAS_API_URL=https://api.meetingbaas.com
+```
+
+**Pre-production:**
+```
+MEETING_BAAS_API_URL=https://api.pre-prod-meetingbaas.com
+```
+
+### Audio Recording
+
+The application can optionally save the meeting audio to WAV files. To enable this feature:
+
+1. Set `ENABLE_AUDIO_RECORDING=true` in your `.env` file
+2. (Optional) Configure the output directory with `AUDIO_OUTPUT_DIR=./recordings`
+
+When enabled, the application will:
+- Capture all audio received from MeetingBaas
+- Concatenate the audio chunks into a single buffer
+- Save the audio as a WAV file when the meeting ends or the bot disconnects
+- Generate timestamped filenames (e.g., `recording_2025-11-26T12-30-45-123Z.wav`)
+
+The recorded audio will have the following specifications:
+- Format: WAV (PCM)
+- Sample Rate: 16kHz
+- Channels: Mono (1 channel)
+- Bit Depth: 16-bit
+
+**Note:** Recording is disabled by default. Audio files can be large, so make sure you have sufficient disk space.
 
 ## License
 

@@ -1,5 +1,5 @@
 import { createBaasClient } from "@meeting-baas/sdk";
-import { apiKeys } from "./config";
+import { apiKeys, apiUrls } from "./config";
 import { createLogger } from "./utils";
 
 const logger = createLogger("MeetingBaas");
@@ -11,9 +11,10 @@ class MeetingBaasClient {
   constructor() {
     this.client = createBaasClient({
       api_key: apiKeys.meetingBaas,
+      base_url: apiUrls.meetingBaas,
     });
 
-    logger.info("Initialized MeetingBaas SDK client");
+    logger.info(`Initialized MeetingBaas SDK client with base URL: ${apiUrls.meetingBaas}`);
   }
 
   /**

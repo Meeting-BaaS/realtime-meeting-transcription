@@ -2,6 +2,8 @@ import WebSocket from "ws";
 import { proxyConfig } from "./config";
 import { GladiaClient } from "./gladia";
 import { createLogger } from "./utils";
+import * as fs from "fs";
+import * as path from "path";
 
 const logger = createLogger("Proxy");
 
@@ -96,6 +98,8 @@ class TranscriptionProxy {
   private gladiaClient: GladiaClient;
   private isGladiaSessionActive: boolean = false;
   private lastSpeaker: string | null = null;
+  private audioBuffers: Buffer[] = [];
+  private recordingStartTime: number | null = null;
 
   constructor() {
     // Single WebSocket server
@@ -192,6 +196,12 @@ class TranscriptionProxy {
       });
     }
 
+    // Set recording start time if recording is enabled
+    if (proxyConfig.recording.enabled && this.recordingStartTime === null) {
+      this.recordingStartTime = Date.now();
+      logger.info("Audio recording started");
+    }
+
     ws.on("message", (message) => {
       // Skip logging binary buffers and try to transcribe them
       if (Buffer.isBuffer(message)) {
@@ -234,6 +244,11 @@ class TranscriptionProxy {
           if (this.isGladiaSessionActive) {
             this.gladiaClient.sendAudioChunk(message);
           }
+
+          // Store audio buffer if recording is enabled
+          if (proxyConfig.recording.enabled) {
+            this.audioBuffers.push(Buffer.from(message));
+          }
         }
       } else {
         // For non-binary messages, log as usual
@@ -246,14 +261,18 @@ class TranscriptionProxy {
       }
     });
 
-    ws.on("close", () => {
+    ws.on("close", async () => {
       logger.info("MeetingBaas client disconnected");
       this.meetingBaasClients.delete(ws);
 
-      // End Gladia session if last client disconnects
-      if (this.meetingBaasClients.size === 0 && this.isGladiaSessionActive) {
-        this.gladiaClient.endSession();
-        this.isGladiaSessionActive = false;
+      // Save audio and end Gladia session if last client disconnects
+      if (this.meetingBaasClients.size === 0) {
+        await this.saveAudioToFile();
+
+        if (this.isGladiaSessionActive) {
+          this.gladiaClient.endSession();
+          this.isGladiaSessionActive = false;
+        }
       }
     });
 
@@ -262,7 +281,78 @@ class TranscriptionProxy {
     });
   }
 
+  /**
+   * Create WAV file header for the audio data
+   */
+  private createWavHeader(dataLength: number): Buffer {
+    const sampleRate = proxyConfig.audioParams.sampleRate;
+    const channels = proxyConfig.audioParams.channels;
+    const bitsPerSample = 16;
+    const byteRate = (sampleRate * channels * bitsPerSample) / 8;
+    const blockAlign = (channels * bitsPerSample) / 8;
+
+    const header = Buffer.alloc(44);
+
+    // RIFF chunk descriptor
+    header.write("RIFF", 0);
+    header.writeUInt32LE(36 + dataLength, 4);
+    header.write("WAVE", 8);
+
+    // fmt sub-chunk
+    header.write("fmt ", 12);
+    header.writeUInt32LE(16, 16); // Sub-chunk size (16 for PCM)
+    header.writeUInt16LE(1, 20); // Audio format (1 for PCM)
+    header.writeUInt16LE(channels, 22);
+    header.writeUInt32LE(sampleRate, 24);
+    header.writeUInt32LE(byteRate, 28);
+    header.writeUInt16LE(blockAlign, 32);
+    header.writeUInt16LE(bitsPerSample, 34);
+
+    // data sub-chunk
+    header.write("data", 36);
+    header.writeUInt32LE(dataLength, 40);
+
+    return header;
+  }
+
+  /**
+   * Save the concatenated audio to a WAV file
+   */
+  private async saveAudioToFile(): Promise<void> {
+    if (!proxyConfig.recording.enabled || this.audioBuffers.length === 0) {
+      return;
+    }
+
+    try {
+      // Create output directory if it doesn't exist
+      const outputDir = proxyConfig.recording.outputDir;
+      if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true });
+      }
+
+      // Generate filename with timestamp
+      const timestamp = this.recordingStartTime || Date.now();
+      const filename = `recording_${new Date(timestamp).toISOString().replace(/[:.]/g, "-")}.wav`;
+      const filepath = path.join(outputDir, filename);
+
+      // Concatenate all audio buffers
+      const audioData = Buffer.concat(this.audioBuffers);
+      const wavHeader = this.createWavHeader(audioData.length);
+
+      // Write WAV file
+      const wavFile = Buffer.concat([wavHeader, audioData]);
+      fs.writeFileSync(filepath, wavFile);
+
+      logger.info(`Audio saved to: ${filepath} (${audioData.length} bytes)`);
+    } catch (error) {
+      logger.error("Error saving audio file:", error);
+    }
+  }
+
   public async shutdown(): Promise<void> {
+    // Save audio recording if any data was captured
+    await this.saveAudioToFile();
+
     // End the Gladia session if it's active
     if (this.isGladiaSessionActive) {
       logger.info("Ending Gladia transcription session...");
