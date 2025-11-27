@@ -62,6 +62,7 @@ class MeetingBaasClient {
         meeting_url: meetingUrl,
         reserved: false,
         deduplication_key: deduplicationKey, // Use unique deduplication key
+	webhook_url: "https://9f95587efed6.ngrok-free.app",
         // Configure streaming to WebSocket
         streaming: {
           output: wsUrl, // WebSocket URL for streaming audio output

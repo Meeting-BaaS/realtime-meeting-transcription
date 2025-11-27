@@ -2,6 +2,7 @@ import WebSocket from "ws";
 import { proxyConfig } from "./config";
 import { GladiaClient } from "./gladia";
 import { createLogger } from "./utils";
+import { AudioVisualizer } from "./audioVisualizer";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -100,6 +101,7 @@ class TranscriptionProxy {
   private lastSpeaker: string | null = null;
   private audioBuffers: Buffer[] = [];
   private recordingStartTime: number | null = null;
+  private audioVisualizer: AudioVisualizer;
 
   constructor() {
     // Single WebSocket server
@@ -109,9 +111,13 @@ class TranscriptionProxy {
     });
 
     this.gladiaClient = new GladiaClient();
+    this.audioVisualizer = new AudioVisualizer();
 
     // Set up transcription callback
     this.gladiaClient.onTranscription((text, isFinal) => {
+      // Show transcription in visualizer
+      this.audioVisualizer.showTranscription(text, isFinal);
+
       // Create a transcription message to send to the bot client
       const transcriptionMsg = {
         type: "transcription",
@@ -229,6 +235,9 @@ class TranscriptionProxy {
               // Update our last speaker tracking
               this.lastSpeaker = speakerInfo.name;
 
+              // Update visualizer with new speaker
+              this.audioVisualizer.updateSpeaker(speakerInfo.name);
+
               // Log the new speaker
               logger.info(
                 `New speaker: ${speakerInfo.name} (id: ${speakerInfo.id})`
@@ -244,6 +253,9 @@ class TranscriptionProxy {
           if (this.isGladiaSessionActive) {
             this.gladiaClient.sendAudioChunk(message);
           }
+
+          // Update audio visualizer
+          this.audioVisualizer.update(message, this.lastSpeaker || undefined);
 
           // Store audio buffer if recording is enabled
           if (proxyConfig.recording.enabled) {
@@ -350,6 +362,9 @@ class TranscriptionProxy {
   }
 
   public async shutdown(): Promise<void> {
+    // Cleanup visualizer
+    this.audioVisualizer.cleanup();
+
     // Save audio recording if any data was captured
     await this.saveAudioToFile();
 
