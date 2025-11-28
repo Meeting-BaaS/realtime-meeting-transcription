@@ -26,6 +26,9 @@ export const proxyConfig = {
     enabled: process.env.ENABLE_AUDIO_RECORDING === "true",
     outputDir: process.env.AUDIO_OUTPUT_DIR || "./recordings",
   },
+  playback: {
+    enabled: process.env.ENABLE_AUDIO_PLAYBACK === "true",
+  },
 };
 
 // API keys

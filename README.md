@@ -47,6 +47,9 @@ A Node.js application that connects to video meetings (Zoom, Google Meet, Micros
    ENABLE_AUDIO_RECORDING=false
    AUDIO_OUTPUT_DIR=./recordings
 
+   # Optional: Enable audio playback through speakers
+   ENABLE_AUDIO_PLAYBACK=false
+
    # Optional: Choose MeetingBaas environment
    # Production (default): https://api.meetingbaas.com
    # Pre-production: https://api.pre-prod-meetingbaas.com
@@ -115,6 +118,7 @@ The application can be configured via the `src/config.ts` file or environment va
 - `MEETING_BAAS_API_URL`: MeetingBaas API URL (default: https://api.meetingbaas.com)
 - `ENABLE_AUDIO_RECORDING`: Enable audio recording (default: false)
 - `AUDIO_OUTPUT_DIR`: Directory where audio recordings will be saved (default: ./recordings)
+- `ENABLE_AUDIO_PLAYBACK`: Enable real-time audio playback through computer speakers (default: false)
 
 ### Environment Selection
 
@@ -150,6 +154,30 @@ The recorded audio will have the following specifications:
 - Bit Depth: 16-bit
 
 **Note:** Recording is disabled by default. Audio files can be large, so make sure you have sufficient disk space.
+
+### Audio Playback
+
+The application can play meeting audio in real-time through your computer speakers. To enable this feature:
+
+1. Set `ENABLE_AUDIO_PLAYBACK=true` in your `.env` file
+2. Make sure your system has audio output devices configured
+
+When enabled, the application will:
+- Stream audio from the meeting directly to your computer speakers in real-time
+- Buffer audio chunks automatically to handle network delays
+- Maintain audio quality at 16kHz mono, 16-bit PCM format
+
+**Important notes:**
+- Audio playback is disabled by default
+- The speaker may take a moment to initialize when the first audio arrives
+- Audio is buffered briefly to prevent gaps during initialization
+- You'll hear the meeting audio with minimal latency (typically < 500ms)
+- Playback will stop automatically when the meeting ends or the bot disconnects
+
+**Troubleshooting:**
+- If you don't hear audio, check your system's audio output settings
+- On macOS/Linux, you may need to grant Node.js permission to access audio output
+- If audio is choppy, check your network connection quality
 
 ## License
 
