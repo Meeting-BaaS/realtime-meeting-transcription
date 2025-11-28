@@ -41,6 +41,7 @@ export const apiKeys = {
 export const apiUrls = {
   meetingBaas:
     process.env.MEETING_BAAS_API_URL || "https://api.meetingbaas.com",
+  meetingBaasWebhook: process.env.MEETING_BAAS_WEBHOOK_URL || undefined,
 };
 
 if (!apiKeys.meetingBaas) {

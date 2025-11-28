@@ -56,19 +56,27 @@ class MeetingBaasClient {
         logger.info(`Streaming audio to: ${wsUrl}`);
       }
 
-      // Join the meeting using the SDK
-      const result = await this.client.joinMeeting({
+      // Prepare join meeting configuration
+      const joinConfig: any = {
         bot_name: botName,
         meeting_url: meetingUrl,
         reserved: false,
         deduplication_key: deduplicationKey, // Use unique deduplication key
-	webhook_url: "https://9f95587efed6.ngrok-free.app",
         // Configure streaming to WebSocket
         streaming: {
           output: wsUrl, // WebSocket URL for streaming audio output
           audio_frequency: "16khz", // Audio frequency for streaming (matches Gladia requirements)
         },
-      });
+      };
+
+      // Add webhook URL if configured in environment
+      if (apiUrls.meetingBaasWebhook) {
+        joinConfig.webhook_url = apiUrls.meetingBaasWebhook;
+        logger.info(`Using webhook URL: ${apiUrls.meetingBaasWebhook}`);
+      }
+
+      // Join the meeting using the SDK
+      const result = await this.client.joinMeeting(joinConfig);
 
       if (result.success) {
         this.botId = result.data.bot_id;
