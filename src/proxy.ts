@@ -107,7 +107,7 @@ class TranscriptionProxy {
   private speaker: any = null;
   private isPlaybackReady: boolean = false;
 
-  constructor() {
+  constructor(mode: string = "Proxy") {
     // Single WebSocket server
     this.server = new WebSocket.Server({
       host: proxyConfig.host,
@@ -115,7 +115,7 @@ class TranscriptionProxy {
     });
 
     this.gladiaClient = new GladiaClient();
-    this.audioVisualizer = new AudioVisualizer();
+    this.audioVisualizer = new AudioVisualizer(mode, proxyConfig.port);
 
     // Initialize speaker for audio playback if enabled
     if (proxyConfig.playback.enabled) {

@@ -40,7 +40,18 @@ export class AudioVisualizer {
 
   // Render throttling to avoid jitter
   private lastRenderTime: number = 0;
-  private readonly MIN_RENDER_INTERVAL: number = 33; // 30 FPS for smooth visualization
+  private readonly MIN_RENDER_INTERVAL: number = 100; // 10 FPS - lighter on CPU
+
+  // Dirty tracking - only redraw what changed
+  private dirtyPanels: Set<string> = new Set();
+  private lastRenderedState: {
+    audioLevel?: number;
+    transcriptionCount?: number;
+    logsCount?: number;
+    duration?: string;
+    speaker?: string;
+    bufferPressure?: number;
+  } = {};
 
   // Recent transcriptions
   private recentTranscriptions: Array<{text: string, isFinal: boolean, timestamp: number}> = [];
@@ -61,7 +72,18 @@ export class AudioVisualizer {
   // Playback buffer pressure
   private bufferPressure: number = 0;
 
-  constructor() {
+  // Configuration
+  private mode: string;
+  private port: number;
+
+  // Cached timeline rendering
+  private cachedTimeline: string = "";
+  private lastTimelineRender: number = 0;
+
+  constructor(mode: string = "Proxy", port: number = 4040) {
+    this.mode = mode;
+    this.port = port;
+
     // Clear screen and hide cursor for smooth updates
     if (this.isEnabled) {
       this.updateTerminalSize();
@@ -165,17 +187,36 @@ export class AudioVisualizer {
   }
 
   /**
-   * Add audio level to history
+   * Add audio level to history (downsampled for performance)
+   * Only keep 1 sample per 100ms (10 samples/sec) instead of every chunk
    */
   private recordAudioLevel(level: number): void {
     const now = Date.now();
+
+    // Downsample: only record if last sample was >100ms ago
+    const lastSample = this.audioLevelHistory[this.audioLevelHistory.length - 1];
+    if (lastSample && now - lastSample.timestamp < 100) {
+      // Update last sample with max level (keep peaks visible)
+      lastSample.level = Math.max(lastSample.level, level);
+      return;
+    }
+
     this.audioLevelHistory.push({ timestamp: now, level });
 
     // Remove old samples (older than AUDIO_HISTORY_SECONDS)
     const cutoffTime = now - this.AUDIO_HISTORY_SECONDS * 1000;
-    this.audioLevelHistory = this.audioLevelHistory.filter(
-      (sample) => sample.timestamp >= cutoffTime
-    );
+    if (this.audioLevelHistory.length > 0 &&
+        this.audioLevelHistory[0].timestamp < cutoffTime) {
+      // Use splice for batch removal (more efficient than filter)
+      let removeCount = 0;
+      for (let i = 0; i < this.audioLevelHistory.length; i++) {
+        if (this.audioLevelHistory[i].timestamp >= cutoffTime) break;
+        removeCount++;
+      }
+      if (removeCount > 0) {
+        this.audioLevelHistory.splice(0, removeCount);
+      }
+    }
   }
 
 
@@ -221,12 +262,25 @@ export class AudioVisualizer {
     process.stdout.write(`\x1b[${y + height - 1};${x}H\x1b[33m╚${"═".repeat(width - 2)}╝\x1b[0m`);
   }
 
+  // Buffer for batched writes (performance optimization)
+  private writeBuffer: string[] = [];
+
   /**
-   * Write text at position
+   * Write text at position (buffered for performance)
    */
   private writeAt(x: number, y: number, text: string, color?: string): void {
     const colorCode = color || "\x1b[0m";
-    process.stdout.write(`\x1b[${y};${x}H${colorCode}${text}\x1b[0m`);
+    this.writeBuffer.push(`\x1b[${y};${x}H${colorCode}${text}\x1b[0m`);
+  }
+
+  /**
+   * Flush all buffered writes to stdout (call after rendering panels)
+   */
+  private flushWrites(): void {
+    if (this.writeBuffer.length > 0) {
+      process.stdout.write(this.writeBuffer.join(""));
+      this.writeBuffer = [];
+    }
   }
 
   /**
@@ -324,7 +378,34 @@ export class AudioVisualizer {
   }
 
   /**
-   * Render full-screen dashboard
+   * Mark panel as needing redraw
+   */
+  private markDirty(panel: string): void {
+    this.dirtyPanels.add(panel);
+  }
+
+  /**
+   * Check if state changed significantly enough to warrant a redraw
+   */
+  private hasSignificantChanges(): boolean {
+    const currentLevel = this.audioLevelHistory[this.audioLevelHistory.length - 1]?.level || 0;
+
+    // Check for significant changes
+    if (this.lastRenderedState.audioLevel === undefined ||
+        Math.abs(currentLevel - this.lastRenderedState.audioLevel) > 5 ||
+        this.lastRenderedState.transcriptionCount !== this.recentTranscriptions.length ||
+        this.lastRenderedState.logsCount !== this.logsBuffer.length ||
+        this.lastRenderedState.duration !== this.displayDuration ||
+        this.lastRenderedState.speaker !== this.lastSpeaker ||
+        this.lastRenderedState.bufferPressure !== this.bufferPressure) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Render full-screen dashboard (optimized with dirty checking)
    */
   private renderDashboard(): void {
     // Throttle rendering to avoid jitter
@@ -332,9 +413,25 @@ export class AudioVisualizer {
     if (now - this.lastRenderTime < this.MIN_RENDER_INTERVAL) {
       return; // Skip this render
     }
+
+    // Skip render if nothing changed
+    if (!this.hasSignificantChanges() && this.dirtyPanels.size === 0) {
+      return;
+    }
+
     this.lastRenderTime = now;
 
-    // Clear screen
+    // Update last rendered state
+    this.lastRenderedState = {
+      audioLevel: this.audioLevelHistory[this.audioLevelHistory.length - 1]?.level || 0,
+      transcriptionCount: this.recentTranscriptions.length,
+      logsCount: this.logsBuffer.length,
+      duration: this.displayDuration,
+      speaker: this.lastSpeaker,
+      bufferPressure: this.bufferPressure
+    };
+
+    // Clear screen (only on full redraw)
     process.stdout.write("\x1b[2J\x1b[H");
 
     const halfWidth = Math.floor(this.termWidth / 2);
@@ -352,6 +449,12 @@ export class AudioVisualizer {
     const bottomHeight = this.termHeight - bottomY + 1;
     this.renderTranscriptionPanel(1, bottomY, halfWidth, bottomHeight);
     this.renderLogsPanel(halfWidth + 1, bottomY, this.termWidth - halfWidth, bottomHeight);
+
+    // Flush all buffered writes to stdout in one operation
+    this.flushWrites();
+
+    // Clear dirty flags
+    this.dirtyPanels.clear();
   }
 
   /**
@@ -360,8 +463,8 @@ export class AudioVisualizer {
   private renderConfigPanel(x: number, y: number, width: number, height: number): void {
     this.drawBox(x, y, width, height, "⚙️  Configuration");
 
-    this.writeAt(x + 2, y + 2, `Mode:       Proxy (Local)`, "\x1b[97m");
-    this.writeAt(x + 2, y + 3, `Port:       4040`, "\x1b[96m");
+    this.writeAt(x + 2, y + 2, `Mode:       ${this.mode}`, "\x1b[97m");
+    this.writeAt(x + 2, y + 3, `Port:       ${this.port}`, "\x1b[96m");
     this.writeAt(x + 2, y + 4, `Duration:   ${this.displayDuration}`, "\x1b[93m");
 
     // Show audio format - evening sky colors
@@ -518,18 +621,31 @@ export class AudioVisualizer {
   }
 
   /**
-   * Render audio timeline with custom width
+   * Render audio timeline with custom width (cached for performance)
+   * Only recalculates every 200ms instead of every frame
    */
   private renderAudioTimelineCustomWidth(width: number): string {
-    if (this.audioLevelHistory.length === 0) {
-      return "\x1b[90m" + "░".repeat(width) + "\x1b[0m";
+    const now = Date.now();
+
+    // Return cached timeline if recent enough (200ms cache)
+    if (this.cachedTimeline && now - this.lastTimelineRender < 200) {
+      return this.cachedTimeline;
     }
 
-    const now = Date.now();
+    if (this.audioLevelHistory.length === 0) {
+      this.cachedTimeline = "\x1b[90m" + "░".repeat(width) + "\x1b[0m";
+      this.lastTimelineRender = now;
+      return this.cachedTimeline;
+    }
+
     const timeSpan = this.AUDIO_HISTORY_SECONDS * 1000;
     const bucketSize = timeSpan / width;
 
     const buckets: number[] = new Array(width).fill(0);
+
+    // Batch character lookups for faster rendering
+    const chars = ["░", "▁", "▃", "▅", "▇", "█"];
+    const colors = ["\x1b[90m", "\x1b[96m", "\x1b[96m", "\x1b[93m", "\x1b[33m", "\x1b[91m"];
 
     for (const sample of this.audioLevelHistory) {
       const age = now - sample.timestamp;
@@ -540,27 +656,24 @@ export class AudioVisualizer {
       }
     }
 
-    // Desert Mediterranean Evening Theme - sunset gradient
-    let timeline = "";
+    // Build timeline string in one pass
+    const parts: string[] = [];
     for (let i = 0; i < buckets.length; i++) {
       const level = buckets[i];
+      let idx = 0;
 
-      if (level === 0) {
-        timeline += "\x1b[90m░\x1b[0m"; // Shadow gray
-      } else if (level < 20) {
-        timeline += "\x1b[96m▁\x1b[0m"; // Evening sky blue
-      } else if (level < 40) {
-        timeline += "\x1b[96m▃\x1b[0m"; // Evening sky blue
-      } else if (level < 60) {
-        timeline += "\x1b[93m▅\x1b[0m"; // Golden hour
-      } else if (level < 80) {
-        timeline += "\x1b[33m▇\x1b[0m"; // Sunset orange
-      } else {
-        timeline += "\x1b[91m█\x1b[0m"; // Deep sunset red
-      }
+      if (level >= 80) idx = 5;
+      else if (level >= 60) idx = 4;
+      else if (level >= 40) idx = 3;
+      else if (level >= 20) idx = 2;
+      else if (level > 0) idx = 1;
+
+      parts.push(colors[idx] + chars[idx] + "\x1b[0m");
     }
 
-    return timeline;
+    this.cachedTimeline = parts.join("");
+    this.lastTimelineRender = now;
+    return this.cachedTimeline;
   }
 
   /**

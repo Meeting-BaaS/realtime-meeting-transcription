@@ -68,7 +68,7 @@ async function runLocalMode() {
   logger.info(`   • Custom client: connect WebSocket and send 16-bit PCM audio`);
 
   // Create proxy only
-  proxy = new TranscriptionProxy();
+  proxy = new TranscriptionProxy("Local");
 
   // Setup graceful shutdown
   setupGracefulShutdown();
@@ -85,7 +85,7 @@ async function runRemoteMode(
   logger.info("☁️  REMOTE MODE: Creating bot via MeetingBaas API...");
 
   // Create proxy and MeetingBaas client
-  proxy = new TranscriptionProxy();
+  proxy = new TranscriptionProxy("Remote");
   meetingBaasClient = new MeetingBaasClient();
 
   // Setup graceful shutdown
