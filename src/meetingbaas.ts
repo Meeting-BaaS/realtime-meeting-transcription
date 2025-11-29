@@ -30,12 +30,14 @@ class MeetingBaasClient {
    * Connect to a meeting via MeetingBaas
    * @param meetingUrl URL of the meeting to join
    * @param botName Name of the bot
-   * @param webhookUrl WebSocket URL where MeetingBaas will stream audio
+   * @param streamingUrl WebSocket URL where MeetingBaas will stream audio (wss://)
+   * @param webhookUrl HTTP/HTTPS URL for event notifications
    * @returns Promise that resolves when connected
    */
   async connect(
     meetingUrl: string,
     botName: string,
+    streamingUrl?: string,
     webhookUrl?: string
   ): Promise<boolean> {
     try {
@@ -46,12 +48,12 @@ class MeetingBaasClient {
       logger.info(`Using deduplication key: ${deduplicationKey}`);
 
       // Convert HTTP/HTTPS URL to WebSocket URL if needed
-      let wsUrl = webhookUrl;
-      if (webhookUrl) {
-        if (webhookUrl.startsWith("https://")) {
-          wsUrl = webhookUrl.replace("https://", "wss://");
-        } else if (webhookUrl.startsWith("http://")) {
-          wsUrl = webhookUrl.replace("http://", "ws://");
+      let wsUrl = streamingUrl;
+      if (streamingUrl) {
+        if (streamingUrl.startsWith("https://")) {
+          wsUrl = streamingUrl.replace("https://", "wss://");
+        } else if (streamingUrl.startsWith("http://")) {
+          wsUrl = streamingUrl.replace("http://", "ws://");
         }
         logger.info(`Streaming audio to: ${wsUrl}`);
       }
@@ -69,10 +71,11 @@ class MeetingBaasClient {
         },
       };
 
-      // Add webhook URL if configured in environment
-      if (apiUrls.meetingBaasWebhook) {
-        joinConfig.webhook_url = apiUrls.meetingBaasWebhook;
-        logger.info(`Using webhook URL: ${apiUrls.meetingBaasWebhook}`);
+      // Add webhook URL - prioritize CLI argument over environment variable
+      const finalWebhookUrl = webhookUrl || apiUrls.meetingBaasWebhook;
+      if (finalWebhookUrl) {
+        joinConfig.webhook_url = finalWebhookUrl;
+        logger.info(`Using webhook URL for notifications: ${finalWebhookUrl}`);
       }
 
       // Join the meeting using the SDK

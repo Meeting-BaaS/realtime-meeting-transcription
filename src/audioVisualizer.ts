@@ -9,6 +9,11 @@ interface TimelineEvent {
   color: string;
 }
 
+interface AudioLevelSample {
+  timestamp: number;
+  level: number;
+}
+
 /**
  * Ultra-fast terminal audio visualizer
  * Shows real-time audio levels and timing info
@@ -27,12 +32,102 @@ export class AudioVisualizer {
   private lastDurationUpdate: number = 0;
   private displayDuration: string = "0:00";
 
+  // Audio level history for timeline visualization
+  private audioLevelHistory: AudioLevelSample[] = [];
+  private readonly AUDIO_HISTORY_SECONDS: number = 30; // Keep last 30 seconds - beautiful waves
+  private termWidth: number = 80;
+  private termHeight: number = 24;
+
+  // Render throttling to avoid jitter
+  private lastRenderTime: number = 0;
+  private readonly MIN_RENDER_INTERVAL: number = 33; // 30 FPS for smooth visualization
+
+  // Recent transcriptions
+  private recentTranscriptions: Array<{text: string, isFinal: boolean, timestamp: number}> = [];
+  private readonly MAX_TRANSCRIPTIONS: number = 100;
+
+  // Logs buffer for error/debug messages
+  private logsBuffer: Array<{text: string, timestamp: number, level: string}> = [];
+  private readonly MAX_LOGS: number = 100;
+  private logsScrollOffset: number = 0;
+
+  // Detected audio parameters
+  private detectedSampleRate: number | null = null;
+  private detectedChannels: number = 1;
+  private detectedBitDepth: number = 16;
+  private audioChunkTimes: number[] = [];
+  private isCalculatingParams: boolean = false;
+
+  // Playback buffer pressure
+  private bufferPressure: number = 0;
+
   constructor() {
     // Clear screen and hide cursor for smooth updates
     if (this.isEnabled) {
+      this.updateTerminalSize();
       process.stdout.write("\x1b[2J\x1b[H\x1b[?25l");
-      this.renderHeader();
+
+      // Update terminal size on resize
+      process.stdout.on('resize', () => {
+        this.updateTerminalSize();
+      });
+
+      // Intercept stderr to capture error logs
+      this.interceptStderr();
     }
+  }
+
+  /**
+   * Intercept stderr to capture logs
+   */
+  private interceptStderr(): void {
+    const originalStderrWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: any, ...args: any[]): boolean => {
+      const text = chunk.toString().trim();
+
+      // Filter out high-frequency repetitive warnings that cause jitter
+      if (text.includes('buffer full') ||
+          text.includes('buffer underflow') ||
+          text.includes('coreaudio') ||
+          text.includes('Speaker drain event') ||
+          text.includes('Flushed')) {
+        // Silently ignore these - they're too frequent and cause TUI jitter
+        return true;
+      }
+
+      // Add other logs to buffer
+      this.addLog(text, 'error');
+
+      // DO NOT write to original stderr - we're in TUI mode, everything goes to the logs panel
+      // This prevents stderr from interfering with TUI rendering
+      return true;
+    }) as any;
+  }
+
+  /**
+   * Add a log entry
+   */
+  public addLog(text: string, level: string = 'info'): void {
+    if (!text || text.length === 0) return;
+
+    this.logsBuffer.push({
+      text,
+      timestamp: Date.now(),
+      level
+    });
+
+    // Keep only last MAX_LOGS entries
+    if (this.logsBuffer.length > this.MAX_LOGS) {
+      this.logsBuffer.shift();
+    }
+  }
+
+  /**
+   * Update terminal dimensions
+   */
+  private updateTerminalSize(): void {
+    this.termWidth = process.stdout.columns || 80;
+    this.termHeight = process.stdout.rows || 24;
   }
 
   /**
@@ -70,6 +165,21 @@ export class AudioVisualizer {
   }
 
   /**
+   * Add audio level to history
+   */
+  private recordAudioLevel(level: number): void {
+    const now = Date.now();
+    this.audioLevelHistory.push({ timestamp: now, level });
+
+    // Remove old samples (older than AUDIO_HISTORY_SECONDS)
+    const cutoffTime = now - this.AUDIO_HISTORY_SECONDS * 1000;
+    this.audioLevelHistory = this.audioLevelHistory.filter(
+      (sample) => sample.timestamp >= cutoffTime
+    );
+  }
+
+
+  /**
    * Format duration in seconds
    */
   private formatDuration(ms: number): string {
@@ -89,20 +199,34 @@ export class AudioVisualizer {
   }
 
   /**
-   * Render the header
+   * Draw a box border (Desert Mediterranean Evening Theme)
    */
-  private renderHeader(): void {
-    process.stdout.write("\x1b[H"); // Move to top
-    console.log(
-      "\x1b[1m\x1b[36m╔════════════════════════════════════════════════════════════════╗\x1b[0m"
-    );
-    console.log(
-      "\x1b[1m\x1b[36m║           🎙️  Real-Time Audio Stream Monitor                  ║\x1b[0m"
-    );
-    console.log(
-      "\x1b[1m\x1b[36m╚════════════════════════════════════════════════════════════════╝\x1b[0m"
-    );
-    console.log("");
+  private drawBox(x: number, y: number, width: number, height: number, title?: string): void {
+    // Top border - golden sand color
+    process.stdout.write(`\x1b[${y};${x}H\x1b[33m╔${"═".repeat(width - 2)}╗\x1b[0m`);
+
+    // Title if provided - sunset glow
+    if (title) {
+      const titlePos = Math.floor((width - title.length - 2) / 2);
+      process.stdout.write(`\x1b[${y};${x + titlePos}H\x1b[1m\x1b[93m┤ ${title} ├\x1b[0m`);
+    }
+
+    // Side borders - golden sand
+    for (let i = 1; i < height - 1; i++) {
+      process.stdout.write(`\x1b[${y + i};${x}H\x1b[33m║\x1b[0m`);
+      process.stdout.write(`\x1b[${y + i};${x + width - 1}H\x1b[33m║\x1b[0m`);
+    }
+
+    // Bottom border - golden sand
+    process.stdout.write(`\x1b[${y + height - 1};${x}H\x1b[33m╚${"═".repeat(width - 2)}╝\x1b[0m`);
+  }
+
+  /**
+   * Write text at position
+   */
+  private writeAt(x: number, y: number, text: string, color?: string): void {
+    const colorCode = color || "\x1b[0m";
+    process.stdout.write(`\x1b[${y};${x}H${colorCode}${text}\x1b[0m`);
   }
 
   /**
@@ -200,9 +324,301 @@ export class AudioVisualizer {
   }
 
   /**
+   * Render full-screen dashboard
+   */
+  private renderDashboard(): void {
+    // Throttle rendering to avoid jitter
+    const now = Date.now();
+    if (now - this.lastRenderTime < this.MIN_RENDER_INTERVAL) {
+      return; // Skip this render
+    }
+    this.lastRenderTime = now;
+
+    // Clear screen
+    process.stdout.write("\x1b[2J\x1b[H");
+
+    const halfWidth = Math.floor(this.termWidth / 2);
+    const thirdHeight = Math.floor(this.termHeight / 3);
+
+    // Top row: Config | Stats (2 panels)
+    this.renderConfigPanel(1, 1, halfWidth, thirdHeight);
+    this.renderAudioStatsPanel(halfWidth + 1, 1, this.termWidth - halfWidth, thirdHeight);
+
+    // Middle: Audio Timeline (full width)
+    this.renderTimelinePanel(1, thirdHeight + 1, this.termWidth, thirdHeight);
+
+    // Bottom row: Transcription (left 50%) | Logs (right 50%)
+    const bottomY = thirdHeight * 2 + 1;
+    const bottomHeight = this.termHeight - bottomY + 1;
+    this.renderTranscriptionPanel(1, bottomY, halfWidth, bottomHeight);
+    this.renderLogsPanel(halfWidth + 1, bottomY, this.termWidth - halfWidth, bottomHeight);
+  }
+
+  /**
+   * Render configuration panel
+   */
+  private renderConfigPanel(x: number, y: number, width: number, height: number): void {
+    this.drawBox(x, y, width, height, "⚙️  Configuration");
+
+    this.writeAt(x + 2, y + 2, `Mode:       Proxy (Local)`, "\x1b[97m");
+    this.writeAt(x + 2, y + 3, `Port:       4040`, "\x1b[96m");
+    this.writeAt(x + 2, y + 4, `Duration:   ${this.displayDuration}`, "\x1b[93m");
+
+    // Show audio format - evening sky colors
+    this.writeAt(x + 2, y + 6, `Audio Format:`, "\x1b[93m");
+    this.writeAt(x + 2, y + 7, `  Rate:     16kHz`, "\x1b[96m");
+    this.writeAt(x + 2, y + 8, `  Channels: ${this.detectedChannels}`, "\x1b[97m");
+    this.writeAt(x + 2, y + 9, `  Bit Depth: ${this.detectedBitDepth}-bit`, "\x1b[97m");
+  }
+
+  /**
+   * Render audio stats panel
+   */
+  private renderAudioStatsPanel(x: number, y: number, width: number, height: number): void {
+    this.drawBox(x, y, width, height, "📊 Audio Statistics");
+
+    const bytesFormatted = this.formatBytes(this.totalBytesReceived);
+    const fps = this.lastUpdateTime > 0 ?
+      ((Date.now() - this.lastUpdateTime) > 0 ? (1000 / (Date.now() - this.lastUpdateTime)).toFixed(1) : "∞") : "0";
+
+    this.writeAt(x + 2, y + 2, `Chunks:     ${this.audioChunkCount}`, "\x1b[97m");
+    this.writeAt(x + 2, y + 3, `Data:       ${bytesFormatted}`, "\x1b[96m");
+    this.writeAt(x + 2, y + 4, `Rate:       ${fps} Hz`, "\x1b[96m");
+    this.writeAt(x + 2, y + 5, `Speaker:    ${this.lastSpeaker}`, "\x1b[93m");
+
+    // Buffer pressure - orange for terracotta/sunset glow
+    const bufferBar = this.renderBufferPressureBar(20);
+    const bufferColor = this.bufferPressure > 80 ? "\x1b[91m" : this.bufferPressure > 50 ? "\x1b[33m" : "\x1b[92m";
+    this.writeAt(x + 2, y + 7, `Buffer:     ${this.bufferPressure}%`, bufferColor);
+    this.writeAt(x + 2, y + 8, bufferBar, bufferColor);
+  }
+
+  /**
+   * Render buffer pressure bar
+   */
+  private renderBufferPressureBar(width: number): string {
+    const filled = Math.floor((this.bufferPressure / 100) * width);
+    const empty = width - filled;
+    return "█".repeat(filled) + "░".repeat(empty);
+  }
+
+  /**
+   * Render audio timeline panel
+   */
+  private renderTimelinePanel(x: number, y: number, width: number, height: number): void {
+    this.drawBox(x, y, width, height, "🎵 Audio Level Timeline (Last 30s)");
+
+    // Get current audio level
+    const latestSample = this.audioLevelHistory[this.audioLevelHistory.length - 1];
+    const currentLevel = latestSample ? latestSample.level : 0;
+
+    // Render current level - sunset colors
+    this.writeAt(x + 2, y + 2, `Current: ${currentLevel.toFixed(1).padStart(5)}%`,
+      currentLevel > 60 ? "\x1b[91m" : currentLevel > 30 ? "\x1b[33m" : "\x1b[96m");
+
+    // Render timeline
+    const timelineWidth = width - 4;
+    const timeline = this.renderAudioTimelineCustomWidth(timelineWidth);
+    this.writeAt(x + 2, y + 3, timeline);
+
+    // Time labels - shadow gray
+    const timeLabel = `│ ${this.AUDIO_HISTORY_SECONDS}s ago${" ".repeat(timelineWidth - 20)}now │`;
+    this.writeAt(x + 2, y + 4, timeLabel, "\x1b[90m");
+
+    // Legend - muted
+    this.writeAt(x + 2, y + 5, "░=silent  ▁▃=low  ▅▇=medium  █=loud", "\x1b[90m");
+  }
+
+  /**
+   * Render transcription panel
+   */
+  private renderTranscriptionPanel(x: number, y: number, width: number, height: number): void {
+    this.drawBox(x, y, width, height, "💬 Live Transcription");
+
+    const contentWidth = width - 4;
+    const maxLines = height - 3;
+    let line = 2;
+
+    if (this.recentTranscriptions.length === 0) {
+      this.writeAt(x + 2, y + line, "Waiting for transcription...", "\x1b[90m");
+    } else {
+      // Show most recent transcriptions (use all available lines)
+      const startIdx = Math.max(0, this.recentTranscriptions.length - maxLines);
+      const toShow = this.recentTranscriptions.slice(startIdx);
+
+      for (const trans of toShow) {
+        if (line >= height - 1) break;
+
+        const age = ((Date.now() - trans.timestamp) / 1000).toFixed(0);
+        const color = trans.isFinal ? "\x1b[97m" : "\x1b[90m";
+        const icon = trans.isFinal ? "📝" : "💬";
+
+        // Wrap text if too long
+        const prefix = `${icon} [${age}s] `;
+        const maxTextWidth = contentWidth - prefix.length;
+        const text = trans.text.slice(0, maxTextWidth);
+
+        this.writeAt(x + 2, y + line, prefix + text, color);
+        line++;
+      }
+
+      // Show scroll indicator if there are more transcriptions - golden
+      if (this.recentTranscriptions.length > maxLines) {
+        const scrollInfo = `[${toShow.length + startIdx}/${this.recentTranscriptions.length}]`;
+        this.writeAt(x + width - scrollInfo.length - 2, y + height - 1, scrollInfo, "\x1b[93m");
+      }
+    }
+  }
+
+  /**
+   * Render logs panel with scrolling
+   */
+  private renderLogsPanel(x: number, y: number, width: number, height: number): void {
+    this.drawBox(x, y, width, height, "📋 Logs");
+
+    const contentWidth = width - 4;
+    const maxLines = height - 3;
+    let line = 2;
+
+    if (this.logsBuffer.length === 0) {
+      this.writeAt(x + 2, y + line, "No logs yet...", "\x1b[90m");
+    } else {
+      // Show most recent logs (scrollable from bottom)
+      const startIdx = Math.max(0, this.logsBuffer.length - maxLines - this.logsScrollOffset);
+      const endIdx = Math.min(this.logsBuffer.length, startIdx + maxLines);
+      const toShow = this.logsBuffer.slice(startIdx, endIdx);
+
+      for (const log of toShow) {
+        if (line >= height - 1) break;
+
+        // Color by level
+        let color = "\x1b[90m";
+        let icon = "ℹ️";
+        if (log.level === 'error' || log.text.includes('error') || log.text.includes('warning')) {
+          color = "\x1b[33m"; // Yellow for warnings/errors
+          icon = "⚠️";
+        }
+        if (log.text.includes('buffer underflow') || log.text.includes('coreaudio')) {
+          color = "\x1b[31m"; // Red for critical errors
+          icon = "❌";
+        }
+
+        // Truncate log text to fit
+        const logText = log.text.slice(0, contentWidth - 3);
+        this.writeAt(x + 2, y + line, `${icon} ${logText}`, color);
+        line++;
+      }
+
+      // Show scroll indicator if there are more logs - golden
+      if (this.logsBuffer.length > maxLines) {
+        const scrollInfo = `[${endIdx}/${this.logsBuffer.length}]`;
+        this.writeAt(x + width - scrollInfo.length - 2, y + height - 1, scrollInfo, "\x1b[93m");
+      }
+    }
+  }
+
+  /**
+   * Render audio timeline with custom width
+   */
+  private renderAudioTimelineCustomWidth(width: number): string {
+    if (this.audioLevelHistory.length === 0) {
+      return "\x1b[90m" + "░".repeat(width) + "\x1b[0m";
+    }
+
+    const now = Date.now();
+    const timeSpan = this.AUDIO_HISTORY_SECONDS * 1000;
+    const bucketSize = timeSpan / width;
+
+    const buckets: number[] = new Array(width).fill(0);
+
+    for (const sample of this.audioLevelHistory) {
+      const age = now - sample.timestamp;
+      const bucketIndex = Math.floor((width - 1) - (age / bucketSize));
+
+      if (bucketIndex >= 0 && bucketIndex < width) {
+        buckets[bucketIndex] = Math.max(buckets[bucketIndex], sample.level);
+      }
+    }
+
+    // Desert Mediterranean Evening Theme - sunset gradient
+    let timeline = "";
+    for (let i = 0; i < buckets.length; i++) {
+      const level = buckets[i];
+
+      if (level === 0) {
+        timeline += "\x1b[90m░\x1b[0m"; // Shadow gray
+      } else if (level < 20) {
+        timeline += "\x1b[96m▁\x1b[0m"; // Evening sky blue
+      } else if (level < 40) {
+        timeline += "\x1b[96m▃\x1b[0m"; // Evening sky blue
+      } else if (level < 60) {
+        timeline += "\x1b[93m▅\x1b[0m"; // Golden hour
+      } else if (level < 80) {
+        timeline += "\x1b[33m▇\x1b[0m"; // Sunset orange
+      } else {
+        timeline += "\x1b[91m█\x1b[0m"; // Deep sunset red
+      }
+    }
+
+    return timeline;
+  }
+
+  /**
+   * Async detection of audio parameters from incoming buffers
+   * NOTE: This is "async" in the sense that heavy calculations are deferred via setImmediate(),
+   * allowing the event loop to process other tasks first. The calculations themselves (~50 numbers)
+   * are so lightweight (<1ms) that they won't cause audio pipeline delays.
+   */
+  private detectAudioParameters(buffer: Buffer, timestamp: number): void {
+    // Fast synchronous tracking - negligible overhead
+    this.audioChunkTimes.push(timestamp);
+    if (this.audioChunkTimes.length > 50) {
+      this.audioChunkTimes.shift();
+    }
+
+    // Defer calculation to avoid blocking audio processing
+    if (this.audioChunkTimes.length >= 20 && !this.detectedSampleRate && !this.isCalculatingParams) {
+      this.isCalculatingParams = true;
+
+      // Use setImmediate() to defer to next event loop iteration
+      // This allows audio chunks to be processed first
+      setImmediate(() => {
+        try {
+          // Calculate average time between chunks (simple loop, ~20-50 iterations)
+          const timeDiffs: number[] = [];
+          for (let i = 1; i < this.audioChunkTimes.length; i++) {
+            timeDiffs.push(this.audioChunkTimes[i] - this.audioChunkTimes[i - 1]);
+          }
+
+          const avgChunkIntervalMs = timeDiffs.reduce((a, b) => a + b, 0) / timeDiffs.length;
+          const avgChunkSize = this.totalBytesReceived / this.audioChunkCount;
+
+          // Calculate sample rate from timing data
+          const bytesPerSample = this.detectedBitDepth / 8 * this.detectedChannels;
+          const samplesPerChunk = avgChunkSize / bytesPerSample;
+          const chunksPerSecond = 1000 / avgChunkIntervalMs;
+          const calculatedSampleRate = Math.round(samplesPerChunk * chunksPerSecond);
+
+          // Snap to common sample rates (8 comparisons)
+          const commonRates = [8000, 16000, 22050, 24000, 32000, 44100, 48000];
+          const closest = commonRates.reduce((prev, curr) =>
+            Math.abs(curr - calculatedSampleRate) < Math.abs(prev - calculatedSampleRate) ? curr : prev
+          );
+
+          this.detectedSampleRate = closest;
+        } catch (e) {
+          // Calculation failed, will retry on next opportunity
+        } finally {
+          this.isCalculatingParams = false;
+        }
+      });
+    }
+  }
+
+  /**
    * Update the display with new audio data
    */
-  public update(audioBuffer: Buffer, speaker?: string): void {
+  public update(audioBuffer: Buffer, speaker?: string, bufferPressure?: number): void {
     if (!this.isEnabled) return;
 
     const now = Date.now();
@@ -216,15 +632,19 @@ export class AudioVisualizer {
       this.lastSpeaker = speaker;
     }
 
-    // Add audio event to timeline
-    this.addTimelineEvent(
-      "audio",
-      `Audio received (${audioBuffer.length}B)`,
-      "\x1b[36m"
-    );
+    // Update buffer pressure
+    if (bufferPressure !== undefined) {
+      this.bufferPressure = bufferPressure;
+    }
 
     // Calculate audio level
     const level = this.calculateAudioLevel(audioBuffer);
+
+    // Record audio level in history for timeline
+    this.recordAudioLevel(level);
+
+    // Async detection of audio parameters
+    this.detectAudioParameters(audioBuffer, now);
 
     // Update duration display only once per second for smoothness
     if (now - this.lastDurationUpdate >= 1000) {
@@ -232,41 +652,8 @@ export class AudioVisualizer {
       this.lastDurationUpdate = now;
     }
 
-    // Move cursor to line 5 (below header)
-    process.stdout.write("\x1b[5;1H");
-
-    // Clear from cursor to end of screen
-    process.stdout.write("\x1b[0J");
-
-    // Display info
-    const bytesFormatted = this.formatBytes(this.totalBytesReceived);
-
-    console.log(`\x1b[1mSession Duration:\x1b[0m ${this.displayDuration}`);
-    console.log(`\x1b[1mCurrent Speaker:\x1b[0m  ${this.lastSpeaker}`);
-    console.log(`\x1b[1mAudio Chunks:\x1b[0m     ${this.audioChunkCount}`);
-    console.log(`\x1b[1mData Received:\x1b[0m    ${bytesFormatted}`);
-    console.log(
-      `\x1b[1mChunk Size:\x1b[0m       ${audioBuffer.length} bytes`
-    );
-    console.log(
-      `\x1b[1mLatency:\x1b[0m          ${latency}ms ${latency > 100 ? "\x1b[31m⚠\x1b[0m" : "\x1b[32m✓\x1b[0m"}`
-    );
-    console.log("");
-
-    // Audio level visualization
-    console.log(
-      `\x1b[1mAudio Level:\x1b[0m      ${level.toFixed(1).padStart(5)}%`
-    );
-    console.log(this.createBar(level, 60));
-    console.log("");
-
-    // FPS / Update rate
-    const fps = latency > 0 ? (1000 / latency).toFixed(1) : "∞";
-    console.log(`\x1b[90mUpdate Rate: ${fps} Hz\x1b[0m`);
-    console.log("");
-
-    // Render timeline
-    this.renderTimeline();
+    // Render the full dashboard
+    this.renderDashboard();
   }
 
   /**
@@ -288,36 +675,49 @@ export class AudioVisualizer {
     // Track transcription time for latency calculation
     this.lastTranscriptionTime = Date.now();
 
-    // Add transcription to timeline
-    const truncatedText = text.slice(0, 30);
-    if (isFinal) {
-      this.addTimelineEvent(
-        "transcription_final",
-        `Final: "${truncatedText}"`,
-        "\x1b[32m"
-      );
-    } else {
-      this.addTimelineEvent(
-        "transcription_partial",
-        `Partial: "${truncatedText}"`,
-        "\x1b[33m"
-      );
+    // Add to recent transcriptions
+    this.recentTranscriptions.push({
+      text,
+      isFinal,
+      timestamp: Date.now()
+    });
+
+    // Keep only recent ones
+    if (this.recentTranscriptions.length > this.MAX_TRANSCRIPTIONS) {
+      this.recentTranscriptions.shift();
     }
 
-    // Move to bottom area
-    process.stdout.write("\x1b[18;1H");
-    console.log(
-      `\x1b[1m${isFinal ? "📝" : "💬"} Transcription ${isFinal ? "(final)" : "(partial)"}:\x1b[0m`
-    );
-    console.log(
-      `\x1b[${isFinal ? "37" : "90"}m${text.slice(0, 200)}\x1b[0m`
-    );
-    console.log("");
+    // Render dashboard to show updated transcription
+    this.renderDashboard();
   }
 
   /**
    * Clean up and restore terminal
    */
+  /**
+   * Reset visualizer state on connection close
+   */
+  public reset(): void {
+    // Clear screen completely
+    process.stdout.write("\x1b[2J\x1b[H");
+
+    // Reset all state
+    this.audioChunkCount = 0;
+    this.totalBytesReceived = 0;
+    this.startTime = Date.now();
+    this.lastSpeaker = "Unknown";
+    this.audioLevelHistory = [];
+    this.recentTranscriptions = [];
+    this.displayDuration = "0:00";
+    this.detectedSampleRate = null;
+    this.audioChunkTimes = [];
+
+    // Display waiting message
+    process.stdout.write("\x1b[2J\x1b[H");
+    const msg = "\n\n  🔌 Connection closed. Waiting for new connections...\n\n";
+    process.stdout.write(msg);
+  }
+
   public cleanup(): void {
     // Show cursor again and clear screen
     process.stdout.write("\x1b[?25h\x1b[2J\x1b[H");
