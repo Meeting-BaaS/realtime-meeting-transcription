@@ -4,12 +4,13 @@
   "description": "WebSocket transcription system for MeetingBaas using Gladia",
   "main": "dist/index.js",
   "scripts": {
+    "rebuild:speaker": "cd node_modules/.pnpm/speaker@0.5.5/node_modules/speaker && npx node-gyp rebuild 2>&1 | tail -3 || true",
+    "postinstall": "pnpm run rebuild:speaker",
     "build": "tsup src/index.ts --dts",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts",
-    "bot": "ts-node src/bot.ts",
-    "proxy": "ts-node src/proxy.ts",
-    "meetingbaas": "ts-node scripts/create-meeting-bot.ts",
+    "dev": "ts-node src/index.ts --remote",
+    "dev:local": "ts-node src/index.ts --local 2>/dev/null",
+    "dev:remote": "ts-node src/index.ts --remote 2>/dev/null",
     "clean": "rm -rf node_modules && pnpm install"
   },
   "keywords": [

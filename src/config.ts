@@ -16,10 +16,10 @@ export const botConfig = {
 // Proxy configuration
 export const proxyConfig = {
   host: process.env.PROXY_HOST || "0.0.0.0",
-  port: parseInt(process.env.PROXY_PORT || "8765"),
+  port: parseInt(process.env.PROXY_PORT || "4040"),
   botUrl: process.env.BOT_URL || "ws://localhost:8766",
   audioParams: {
-    sampleRate: 16000,
+    sampleRate: 16000, // Match bot's streaming_audio_frequency and Gladia requirements
     channels: 1,
   },
   recording: {

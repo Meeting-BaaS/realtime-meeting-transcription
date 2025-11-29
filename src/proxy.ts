@@ -8,18 +8,7 @@ import * as path from "path";
 
 const logger = createLogger("Proxy");
 
-// Conditionally import speaker only if playback is enabled
-let Speaker: any = null;
-if (proxyConfig.playback.enabled) {
-  try {
-    Speaker = require("speaker");
-    logger.info("Speaker module loaded successfully");
-  } catch (error) {
-    logger.error("Failed to load speaker module. Audio playback will be disabled.", error);
-    // Update config to reflect that playback is not available
-    (proxyConfig.playback as any).enabled = false;
-  }
-}
+// Speaker module loaded dynamically in initializeSpeaker() if playback is enabled
 
 // Define simple message types to replace protobufs
 interface AudioMessage {
@@ -116,10 +105,9 @@ class TranscriptionProxy {
   private recordingStartTime: number | null = null;
   private audioVisualizer: AudioVisualizer;
   private speaker: any = null;
-  private playbackBuffer: Buffer[] = [];
   private isPlaybackReady: boolean = false;
 
-  constructor() {
+  constructor(mode: string = "Proxy") {
     // Single WebSocket server
     this.server = new WebSocket.Server({
       host: proxyConfig.host,
@@ -127,7 +115,7 @@ class TranscriptionProxy {
     });
 
     this.gladiaClient = new GladiaClient();
-    this.audioVisualizer = new AudioVisualizer();
+    this.audioVisualizer = new AudioVisualizer(mode, proxyConfig.port);
 
     // Initialize speaker for audio playback if enabled
     if (proxyConfig.playback.enabled) {
@@ -185,21 +173,24 @@ class TranscriptionProxy {
    */
   private initializeSpeaker(): void {
     try {
+      const Speaker = require("speaker");
       this.speaker = new Speaker({
         channels: proxyConfig.audioParams.channels,
         bitDepth: 16,
         sampleRate: proxyConfig.audioParams.sampleRate,
+        // Minimize internal buffering for lowest latency
+        highWaterMark: 0,
+        lowWaterMark: 0,
       });
 
-      // Mark as ready immediately - the speaker module opens synchronously
+      logger.info(`Speaker configured: ${proxyConfig.audioParams.sampleRate}Hz, ${proxyConfig.audioParams.channels}ch, 16-bit`);
+
+      // Mark as ready immediately
       this.isPlaybackReady = true;
 
       this.speaker.on("open", () => {
         logger.info("Audio playback started");
         this.isPlaybackReady = true;
-
-        // Flush any buffered audio
-        this.flushPlaybackBuffer();
       });
 
       this.speaker.on("error", (error: any) => {
@@ -221,54 +212,16 @@ class TranscriptionProxy {
   }
 
   /**
-   * Flush buffered audio to the speaker
-   */
-  private flushPlaybackBuffer(): void {
-    if (!this.speaker || !this.isPlaybackReady || this.playbackBuffer.length === 0) {
-      return;
-    }
-
-    while (this.playbackBuffer.length > 0) {
-      const buffer = this.playbackBuffer.shift();
-      if (buffer) {
-        this.speaker.write(buffer);
-      }
-    }
-  }
-
-  /**
-   * Play audio through the speaker
+   * Play audio directly to speaker (no buffering)
    */
   private playAudio(audioBuffer: Buffer): void {
-    if (!proxyConfig.playback.enabled) {
+    if (!proxyConfig.playback.enabled || !this.speaker || !this.isPlaybackReady) {
       return;
     }
 
-    if (!this.speaker) {
-      logger.warn("Speaker not initialized, cannot play audio");
-      return;
-    }
-
-    if (this.isPlaybackReady) {
-      // Speaker is ready, write directly
-      try {
-        const written = this.speaker.write(audioBuffer);
-        if (!written) {
-          logger.warn("Speaker buffer is full, audio may be delayed");
-        }
-      } catch (error) {
-        logger.error("Error writing to speaker:", error);
-      }
-    } else {
-      // Speaker not ready yet, buffer the audio
-      this.playbackBuffer.push(Buffer.from(audioBuffer));
-
-      // Limit buffer size to prevent memory issues (keep last 5 seconds)
-      const maxBufferSize = 100;
-      if (this.playbackBuffer.length > maxBufferSize) {
-        this.playbackBuffer.shift();
-      }
-    }
+    // Write directly to speaker - no buffering, no backpressure handling
+    // If it can't keep up, audio will be choppy but no latency
+    this.speaker.write(audioBuffer);
   }
 
   private setupBotClient(ws: WebSocket) {
@@ -366,10 +319,10 @@ class TranscriptionProxy {
             this.gladiaClient.sendAudioChunk(message);
           }
 
-          // Update audio visualizer
-          this.audioVisualizer.update(message, this.lastSpeaker || undefined);
+          // Update audio visualizer (no buffering, so buffer pressure always 0)
+          this.audioVisualizer.update(message, this.lastSpeaker || undefined, 0);
 
-          // Play audio through speakers if enabled
+          // Play audio directly through speakers if enabled (no buffering)
           this.playAudio(message);
 
           // Store audio buffer if recording is enabled
@@ -394,12 +347,18 @@ class TranscriptionProxy {
 
       // Save audio and end Gladia session if last client disconnects
       if (this.meetingBaasClients.size === 0) {
+        // Clear and reset the visualizer
+        this.audioVisualizer.reset();
+
         await this.saveAudioToFile();
 
         if (this.isGladiaSessionActive) {
           this.gladiaClient.endSession();
           this.isGladiaSessionActive = false;
         }
+
+        // Show disconnection message
+        logger.info("All clients disconnected. Waiting for new connections...");
       }
     });
 
