@@ -30,6 +30,7 @@
     "speaker": "^0.5.5",
     "ts-node": "^10.9.1",
     "typescript": "^5.0.4",
+    "voice-router-dev": "^0.1.0",
     "ws": "^8.13.0"
   },
   "devDependencies": {
