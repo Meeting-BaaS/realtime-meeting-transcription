@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { proxyConfig } from "./config";
-import { GladiaClient } from "./gladia";
+import { VoiceRouterClient } from "./voiceRouter";
 import { createLogger } from "./utils";
 import { AudioVisualizer } from "./audioVisualizer";
 import * as fs from "fs";
@@ -98,8 +98,8 @@ class TranscriptionProxy {
   private server: WebSocket.Server;
   private botClient: WebSocket | null = null;
   private meetingBaasClients: Set<WebSocket> = new Set();
-  private gladiaClient: GladiaClient;
-  private isGladiaSessionActive: boolean = false;
+  private voiceRouterClient: VoiceRouterClient;
+  private isTranscriptionSessionActive: boolean = false;
   private lastSpeaker: string | null = null;
   private audioBuffers: Buffer[] = [];
   private recordingStartTime: number | null = null;
@@ -114,7 +114,7 @@ class TranscriptionProxy {
       port: proxyConfig.port,
     });
 
-    this.gladiaClient = new GladiaClient();
+    this.voiceRouterClient = new VoiceRouterClient(); // Uses default from config
     this.audioVisualizer = new AudioVisualizer(mode, proxyConfig.port);
 
     // Initialize speaker for audio playback if enabled
@@ -123,7 +123,7 @@ class TranscriptionProxy {
     }
 
     // Set up transcription callback
-    this.gladiaClient.onTranscription((text, isFinal) => {
+    this.voiceRouterClient.onTranscription((text, isFinal) => {
       // Show transcription in visualizer
       this.audioVisualizer.showTranscription(text, isFinal);
 
@@ -254,15 +254,15 @@ class TranscriptionProxy {
     logger.info("MeetingBaas client connected");
     this.meetingBaasClients.add(ws);
 
-    // Initialize Gladia session if not already active
-    if (!this.isGladiaSessionActive) {
-      logger.info("Initializing Gladia transcription session...");
-      this.gladiaClient.initSession().then((success) => {
-        this.isGladiaSessionActive = success;
+    // Initialize transcription session if not already active
+    if (!this.isTranscriptionSessionActive) {
+      logger.info(`Initializing transcription session with ${this.voiceRouterClient.getProvider()}...`);
+      this.voiceRouterClient.initSession().then((success) => {
+        this.isTranscriptionSessionActive = success;
         if (success) {
-          logger.info("Gladia transcription session ready");
+          logger.info("Transcription session ready");
         } else {
-          logger.error("Failed to initialize Gladia transcription session");
+          logger.error("Failed to initialize transcription session");
         }
       });
     }
@@ -314,9 +314,9 @@ class TranscriptionProxy {
             logger.info(`Message from MeetingBaas: ${inspectMessage(message)}`);
           }
         } catch {
-          // Likely audio data, send to Gladia for transcription
-          if (this.isGladiaSessionActive) {
-            this.gladiaClient.sendAudioChunk(message);
+          // Likely audio data, send for transcription
+          if (this.isTranscriptionSessionActive) {
+            this.voiceRouterClient.sendAudioChunk(message);
           }
 
           // Update audio visualizer (no buffering, so buffer pressure always 0)
@@ -352,9 +352,9 @@ class TranscriptionProxy {
 
         await this.saveAudioToFile();
 
-        if (this.isGladiaSessionActive) {
-          this.gladiaClient.endSession();
-          this.isGladiaSessionActive = false;
+        if (this.isTranscriptionSessionActive) {
+          await this.voiceRouterClient.endSession();
+          this.isTranscriptionSessionActive = false;
         }
 
         // Show disconnection message
@@ -454,11 +454,11 @@ class TranscriptionProxy {
     // Save audio recording if any data was captured
     await this.saveAudioToFile();
 
-    // End the Gladia session if it's active
-    if (this.isGladiaSessionActive) {
-      logger.info("Ending Gladia transcription session...");
-      await this.gladiaClient.endSession();
-      this.isGladiaSessionActive = false;
+    // End the transcription session if it's active
+    if (this.isTranscriptionSessionActive) {
+      logger.info("Ending transcription session...");
+      await this.voiceRouterClient.endSession();
+      this.isTranscriptionSessionActive = false;
     }
 
     // Close all client connections

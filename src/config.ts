@@ -31,10 +31,22 @@ export const proxyConfig = {
   },
 };
 
-// API keys
+// API keys for transcription providers
 export const apiKeys = {
   meetingBaas: process.env.MEETING_BAAS_API_KEY || "",
   gladia: process.env.GLADIA_API_KEY || "",
+  assemblyai: process.env.ASSEMBLYAI_API_KEY || "",
+  deepgram: process.env.DEEPGRAM_API_KEY || "",
+  azureStt: process.env.AZURE_STT_API_KEY || "",
+  azureSttRegion: process.env.AZURE_STT_REGION || "",
+  openaiWhisper: process.env.OPENAI_API_KEY || "",
+  speechmatics: process.env.SPEECHMATICS_API_KEY || "",
+};
+
+// Transcription provider configuration
+export const transcriptionConfig = {
+  // Default provider (can be: gladia, assemblyai, deepgram, azure-stt, openai-whisper, speechmatics)
+  defaultProvider: process.env.TRANSCRIPTION_PROVIDER || "gladia",
 };
 
 // API URLs
@@ -49,7 +61,18 @@ if (!apiKeys.meetingBaas) {
   process.exit(1);
 }
 
-if (!apiKeys.gladia) {
-  console.error("GLADIA_API_KEY is required");
+// Validate at least one transcription provider is configured
+const hasTranscriptionProvider =
+  apiKeys.gladia ||
+  apiKeys.assemblyai ||
+  apiKeys.deepgram ||
+  apiKeys.azureStt ||
+  apiKeys.openaiWhisper ||
+  apiKeys.speechmatics;
+
+if (!hasTranscriptionProvider) {
+  console.error(
+    "At least one transcription provider API key is required. Set one of: GLADIA_API_KEY, ASSEMBLYAI_API_KEY, DEEPGRAM_API_KEY, AZURE_STT_API_KEY, OPENAI_API_KEY, SPEECHMATICS_API_KEY"
+  );
   process.exit(1);
 }
