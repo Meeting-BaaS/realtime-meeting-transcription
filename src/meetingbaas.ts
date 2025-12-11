@@ -7,6 +7,7 @@ const logger = createLogger("MeetingBaas");
 class MeetingBaasClient {
   private client: ReturnType<typeof createBaasClient>;
   private botId: string | null = null;
+  private botIds: string[] = []; // Track multiple bots
 
   constructor() {
     this.client = createBaasClient({
@@ -118,6 +119,80 @@ class MeetingBaasClient {
 
   public getBotId(): string | null {
     return this.botId;
+  }
+
+  public getBotIds(): string[] {
+    return this.botIds;
+  }
+
+  /**
+   * Connect multiple bots to the same meeting
+   * @param meetingUrl URL of the meeting to join
+   * @param botConfigs Array of bot configurations (name and streaming URL)
+   * @param webhookUrl Optional webhook URL for notifications
+   * @returns Promise that resolves with array of bot IDs
+   */
+  async connectMultiple(
+    meetingUrl: string,
+    botConfigs: Array<{ name: string; streamingUrl: string }>,
+    webhookUrl?: string
+  ): Promise<string[]> {
+    const botIds: string[] = [];
+
+    logger.info(`Creating ${botConfigs.length} bots for meeting: ${meetingUrl}`);
+
+    for (const config of botConfigs) {
+      try {
+        const success = await this.connect(
+          meetingUrl,
+          config.name,
+          config.streamingUrl,
+          webhookUrl
+        );
+
+        if (success && this.botId) {
+          botIds.push(this.botId);
+          this.botIds.push(this.botId);
+          logger.info(`Bot ${config.name} created with ID: ${this.botId}`);
+        } else {
+          logger.error(`Failed to create bot: ${config.name}`);
+        }
+
+        // Small delay between creating bots to avoid rate limiting
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      } catch (error) {
+        logger.error(`Error creating bot ${config.name}:`, error);
+      }
+    }
+
+    logger.info(`Successfully created ${botIds.length}/${botConfigs.length} bots`);
+    return botIds;
+  }
+
+  /**
+   * Disconnect all bots
+   */
+  async disconnectAll(): Promise<void> {
+    logger.info(`Disconnecting ${this.botIds.length} bots...`);
+
+    for (const botId of this.botIds) {
+      try {
+        const result = await this.client.leaveMeeting({
+          uuid: botId,
+        });
+
+        if (result.success) {
+          logger.info(`Bot ${botId} successfully left the meeting`);
+        } else {
+          logger.error(`Error leaving meeting for bot ${botId}:`, result.error);
+        }
+      } catch (error) {
+        logger.error(`Error leaving meeting for bot ${botId}:`, error);
+      }
+    }
+
+    this.botIds = [];
+    this.botId = null;
   }
 }
 

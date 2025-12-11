@@ -11,6 +11,7 @@
     "dev": "ts-node src/index.ts --remote",
     "dev:local": "ts-node src/index.ts --local 2>/dev/null",
     "dev:remote": "ts-node src/index.ts --remote 2>/dev/null",
+    "dev:compare": "ts-node src/index.ts --compare 2>/dev/null",
     "clean": "rm -rf node_modules && pnpm install"
   },
   "keywords": [
