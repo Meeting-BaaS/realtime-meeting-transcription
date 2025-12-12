@@ -1,8 +1,10 @@
 import { createBaasClient } from "@meeting-baas/sdk";
 import { apiKeys, apiUrls } from "./config";
 import { createLogger } from "./utils";
+import { getProcessLogger } from "./processLogger";
 
 const logger = createLogger("MeetingBaas");
+const processLogger = getProcessLogger();
 
 class MeetingBaasClient {
   private client: ReturnType<typeof createBaasClient>;
@@ -42,6 +44,11 @@ class MeetingBaasClient {
   ): Promise<boolean> {
     try {
       logger.info(`Connecting to meeting: ${meetingUrl}`);
+      processLogger?.info(
+        `MeetingBaas connecting to meeting`,
+        "MeetingBaas",
+        { meetingUrl, botName, streamingUrl }
+      );
 
       // Generate a unique deduplication key
       const deduplicationKey = this.generateDeduplicationKey(botName);
@@ -56,6 +63,11 @@ class MeetingBaasClient {
           wsUrl = streamingUrl.replace("http://", "ws://");
         }
         logger.info(`Streaming audio to: ${wsUrl}`);
+        processLogger?.info(
+          `MeetingBaas will stream audio to`,
+          "MeetingBaas",
+          { originalUrl: streamingUrl, wsUrl }
+        );
       }
 
       // Prepare join meeting configuration
@@ -79,15 +91,31 @@ class MeetingBaasClient {
       }
 
       // Join the meeting using the SDK
+      processLogger?.info(
+        `Calling MeetingBaas API joinMeeting`,
+        "MeetingBaas",
+        { config: joinConfig }
+      );
+
       const result = await this.client.joinMeeting(joinConfig);
 
       if (result.success) {
         this.botId = result.data.bot_id;
         logger.info(`Bot created with ID: ${this.botId}`);
         logger.info(`API Response: ${JSON.stringify(result.data)}`);
+        processLogger?.info(
+          `MeetingBaas bot created successfully`,
+          "MeetingBaas",
+          { botId: this.botId, response: result.data }
+        );
         return true;
       } else {
         logger.error("Failed to join meeting:", result.error);
+        processLogger?.error(
+          `MeetingBaas API error`,
+          "MeetingBaas",
+          { error: result.error }
+        );
         return false;
       }
     } catch (error) {

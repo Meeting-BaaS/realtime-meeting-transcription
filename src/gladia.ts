@@ -1,142 +1,231 @@
-import axios from "axios";
-import WebSocket from "ws";
-import { apiKeys } from "./config";
+import {
+  VoiceRouter,
+  GladiaAdapter,
+  DeepgramAdapter,
+  AssemblyAIAdapter,
+  AzureSTTAdapter,
+  OpenAIWhisperAdapter,
+  SpeechmaticsAdapter,
+} from "voice-router-dev";
+import type { StreamingSession } from "voice-router-dev";
+import { voiceRouterConfig, proxyConfig } from "./config";
 import { createLogger } from "./utils";
+import { TranscriptLogger, createTranscriptLogger } from "./transcriptLogger";
+import { getProcessLogger } from "./processLogger";
 
-const logger = createLogger("Gladia");
+const logger = createLogger("TranscriptionClient");
+const processLogger = getProcessLogger();
 
-// Gladia API client for real-time transcription
-class GladiaClient {
-  private apiKey: string;
-  private apiUrl: string = "https://api.gladia.io";
-  private ws: WebSocket | null = null;
-  private sessionId: string | null = null;
+// Transcription client using VoiceRouter SDK for multi-provider support
+class TranscriptionClient {
+  private router: VoiceRouter;
+  private streamingSession: StreamingSession | null = null;
   private onTranscriptionCallback:
     | ((text: string, isFinal: boolean) => void)
     | null = null;
+  private currentProvider: string;
+  private transcriptLogger: TranscriptLogger | null = null;
 
   constructor() {
-    this.apiKey = apiKeys.gladia || "";
-    if (!this.apiKey) {
+    // Initialize VoiceRouter with configured providers
+    this.router = new VoiceRouter(voiceRouterConfig as any);
+    this.currentProvider = voiceRouterConfig.defaultProvider;
+
+    // Register all available adapters based on configuration
+    const registeredProviders: string[] = [];
+
+    if (voiceRouterConfig.providers.gladia) {
+      this.router.registerAdapter(new GladiaAdapter());
+      registeredProviders.push("gladia");
+    }
+
+    if (voiceRouterConfig.providers.deepgram) {
+      this.router.registerAdapter(new DeepgramAdapter());
+      registeredProviders.push("deepgram");
+    }
+
+    if (voiceRouterConfig.providers.assemblyai) {
+      this.router.registerAdapter(new AssemblyAIAdapter());
+      registeredProviders.push("assemblyai");
+    }
+
+    if (voiceRouterConfig.providers["azure-stt"]) {
+      this.router.registerAdapter(new AzureSTTAdapter());
+      registeredProviders.push("azure-stt");
+    }
+
+    if (voiceRouterConfig.providers["openai-whisper"]) {
+      this.router.registerAdapter(new OpenAIWhisperAdapter());
+      registeredProviders.push("openai-whisper");
+    }
+
+    if (voiceRouterConfig.providers.speechmatics) {
+      this.router.registerAdapter(new SpeechmaticsAdapter());
+      registeredProviders.push("speechmatics");
+    }
+
+    if (registeredProviders.length === 0) {
       logger.error(
-        "Gladia API key not found. Please set GLADIA_API_KEY in .env"
+        "No transcription providers configured. Please set at least one API key in .env"
+      );
+    } else {
+      logger.info(
+        `Initialized VoiceRouter with providers: ${registeredProviders.join(
+          ", "
+        )}`
+      );
+      logger.info(`Default provider: ${this.currentProvider}`);
+      logger.info(
+        `Selection strategy: ${voiceRouterConfig.selectionStrategy}`
       );
     }
   }
 
-  // Initialize a streaming session with Gladia
-  async initSession(): Promise<boolean> {
+  // Initialize a streaming session with the configured provider
+  async initSession(provider?: string): Promise<boolean> {
     try {
-      const response = await axios.post(
-        `${this.apiUrl}/v2/live`,
+      // Use specified provider or fall back to default
+      const selectedProvider = provider || this.currentProvider;
+
+      logger.info(`Initializing streaming session with provider: ${selectedProvider}`);
+
+      // Initialize transcript logger if enabled
+      if (proxyConfig.transcriptLogging.enabled) {
+        this.transcriptLogger = createTranscriptLogger(
+          proxyConfig.transcriptLogging.outputDir,
+          selectedProvider,
+          true
+        );
+
+        this.transcriptLogger.updateMetadata({
+          language: "en",
+          sampleRate: 16000,
+          encoding: "linear16",
+        });
+
+        logger.info(
+          `Transcript logging enabled: ${this.transcriptLogger.getSessionInfo().filePath}`
+        );
+      }
+
+      // Start streaming session with VoiceRouter
+      this.streamingSession = await this.router.transcribeStream(
         {
-          encoding: "wav/pcm",
-          bit_depth: 16,
-          sample_rate: 16000,
+          provider: selectedProvider as any,
+          encoding: "linear16",  // SDK handles conversion to provider format
+          sampleRate: 16000,
+          language: "en",
+          interimResults: true,
           channels: 1,
-          model: "accurate",
-          language_config: {
-            languages: ["en"], // Set to English by default
-            code_switching: false,
-          },
-          messages_config: {
-            receive_partial_transcripts: true,
-            receive_final_transcripts: true,
-          },
         },
         {
-          headers: {
-            "x-gladia-key": this.apiKey,
-          },
-        }
-      );
+          onTranscript: (event) => {
+            // Handle transcript events
+            const text = event.text || "";
+            const isFinal = event.isFinal || false;
 
-      this.sessionId = response.data.id;
-      const wsUrl = response.data.url;
+            // Log ALL transcript events to console for debugging
+            logger.info(
+              `📝 Transcript from ${selectedProvider} ${isFinal ? "(FINAL)" : "(partial)"}: "${text}"`
+            );
 
-      logger.info(`Gladia session initialized: ${this.sessionId}`);
+            processLogger?.info(
+              `Received transcript from ${selectedProvider}`,
+              "TranscriptionClient",
+              {
+                text: text || "(empty)",
+                isFinal,
+                textLength: text.length,
+                speaker: event.speaker,
+                confidence: event.confidence
+              }
+            );
 
-      // Connect to the WebSocket and wait for it to be ready
-      await this.connectWebSocket(wsUrl);
-      return true;
-    } catch (error: any) {
-      logger.error("Failed to initialize Gladia session:", error.message);
-      if (error.response?.data) {
-        logger.error("Gladia API error details:", JSON.stringify(error.response.data, null, 2));
-      }
-      return false;
-    }
-  }
-
-  // Connect to Gladia's WebSocket for real-time transcription
-  private connectWebSocket(url: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(url);
-
-      this.ws.on("open", () => {
-        logger.info("Connected to Gladia WebSocket");
-        resolve();
-      });
-
-    this.ws.on("message", (data) => {
-      try {
-        const message = JSON.parse(data.toString());
-        if (message.type === "transcript") {
-          const utterance = message.data.utterance;
-          const isFinal = message.data.is_final;
-
-          if (utterance && utterance.text) {
-            // only log if it's final, remove this
-            // if you want to log partial transcripts
-            if (isFinal) {
-              logger.info(
-                `Transcription ${isFinal ? "(final)" : "(partial)"}: ${
-                  utterance.text
-                }`
+            // Log to file
+            if (this.transcriptLogger) {
+              this.transcriptLogger.logTranscript(
+                text,
+                isFinal,
+                event.speaker?.toString(),
+                event.confidence
               );
             }
 
+            // Call the registered callback
             if (this.onTranscriptionCallback) {
-              this.onTranscriptionCallback(utterance.text, isFinal);
+              this.onTranscriptionCallback(text, isFinal);
             }
-          }
+          },
+          onError: (error) => {
+            logger.error(`❌ Transcription ERROR from ${selectedProvider}:`, error);
+            processLogger?.error(
+              `Transcription error from ${selectedProvider}`,
+              "TranscriptionClient",
+              { error: JSON.stringify(error) }
+            );
+          },
+          onOpen: () => {
+            logger.info(`✅ WebSocket CONNECTED to ${selectedProvider} streaming session`);
+            processLogger?.info(
+              `WebSocket connection opened to ${selectedProvider}`,
+              "TranscriptionClient"
+            );
+          },
+          onClose: () => {
+            logger.info(`🔌 WebSocket CLOSED from ${selectedProvider}`);
+            processLogger?.info(
+              `WebSocket connection closed from ${selectedProvider}`,
+              "TranscriptionClient"
+            );
+          },
         }
-      } catch (error) {
-        logger.error("Error parsing Gladia message:", error);
+      );
+
+      this.currentProvider = selectedProvider;
+      logger.info(`Streaming session initialized successfully`);
+      return true;
+    } catch (error: any) {
+      logger.error("Failed to initialize streaming session:", error.message);
+      if (error.response?.data) {
+        logger.error(
+          "API error details:",
+          JSON.stringify(error.response.data, null, 2)
+        );
       }
-    });
-
-    this.ws.on("error", (error) => {
-      logger.error("Gladia WebSocket error:", error);
-      reject(error);
-    });
-
-    this.ws.on("close", () => {
-      logger.info("Gladia WebSocket connection closed");
-    });
-    });
+      return false;
+    }
   }
 
-  // Send audio chunk to Gladia for transcription
-  sendAudioChunk(audioData: Buffer) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      logger.warn("WebSocket not connected, ignoring audio chunk");
+  // Send audio chunk to the transcription provider
+  async sendAudioChunk(audioData: Buffer): Promise<boolean> {
+    if (!this.streamingSession) {
+      logger.warn("⚠️ Streaming session not initialized, ignoring audio chunk");
+      processLogger?.error("sendAudioChunk called but streaming session not initialized", "TranscriptionClient");
       return false;
     }
 
-    try {
-      // Send audio chunk message
-      const message = {
-        type: "audio_chunk",
-        data: {
-          chunk: audioData.toString("base64"),
-        },
-      };
+    processLogger?.debug(
+      `Sending audio chunk to ${this.currentProvider}`,
+      "TranscriptionClient",
+      {
+        size: audioData.length,
+        firstBytes: audioData.slice(0, 16).toString('hex'),
+        isBuffer: Buffer.isBuffer(audioData)
+      }
+    );
 
-      this.ws.send(JSON.stringify(message));
+    try {
+      // Send audio data to the streaming session
+      await this.streamingSession.sendAudio({ data: audioData });
+      processLogger?.debug(`Audio chunk sent successfully to ${this.currentProvider}`, "TranscriptionClient");
       return true;
-    } catch (error) {
-      logger.error("Error sending audio chunk to Gladia:", error);
+    } catch (error: any) {
+      logger.error("❌ Error sending audio chunk:", error);
+      processLogger?.error(
+        `Failed to send audio to ${this.currentProvider}`,
+        "TranscriptionClient",
+        { error: error.message, stack: error.stack }
+      );
       return false;
     }
   }
@@ -147,15 +236,59 @@ class GladiaClient {
   }
 
   // End transcription session
-  endSession() {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      // Send stop recording message
-      this.ws.send(JSON.stringify({ type: "stop_recording" }));
-      this.ws.close();
+  async endSession(): Promise<void> {
+    if (this.streamingSession) {
+      try {
+        await this.streamingSession.close();
+        logger.info("Streaming session ended");
+      } catch (error) {
+        logger.error("Error ending streaming session:", error);
+      }
+      this.streamingSession = null;
     }
-    this.ws = null;
-    this.sessionId = null;
+
+    // End transcript logging session
+    if (this.transcriptLogger) {
+      this.transcriptLogger.endSession();
+      const info = this.transcriptLogger.getSessionInfo();
+      logger.info(`Transcript session saved:`);
+      logger.info(`  Session ID: ${info.sessionId}`);
+      logger.info(`  File: ${info.filePath}`);
+      logger.info(`  Duration: ${info.duration.toFixed(2)}s`);
+      logger.info(`  Transcripts: ${info.transcriptCount}`);
+      this.transcriptLogger = null;
+    }
+  }
+
+  // Get the VoiceRouter instance for advanced usage
+  getRouter(): VoiceRouter {
+    return this.router;
+  }
+
+  // Get current provider
+  getCurrentProvider(): string {
+    return this.currentProvider;
+  }
+
+  // Get list of registered providers
+  getRegisteredProviders(): string[] {
+    return this.router.getRegisteredProviders() as string[];
+  }
+
+  // Get information about the last transcript session
+  getLastTranscriptInfo(): { sessionDir: string; transcriptCount: number; duration: number } | null {
+    if (this.transcriptLogger && this.transcriptLogger.isEnabled()) {
+      const info = this.transcriptLogger.getSessionInfo();
+      return {
+        sessionDir: info.sessionDir,
+        transcriptCount: info.transcriptCount,
+        duration: info.duration,
+      };
+    }
+    return null;
   }
 }
 
-export { GladiaClient };
+// Export with backward-compatible name
+export { TranscriptionClient };
+export { TranscriptionClient as GladiaClient }; // Backward compatibility alias
