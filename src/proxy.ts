@@ -3,10 +3,12 @@ import { proxyConfig } from "./config";
 import { GladiaClient } from "./gladia";
 import { createLogger } from "./utils";
 import { AudioVisualizer } from "./audioVisualizer";
+import { getProcessLogger } from "./processLogger";
 import * as fs from "fs";
 import * as path from "path";
 
 const logger = createLogger("Proxy");
+const processLogger = getProcessLogger();
 
 // Speaker module loaded dynamically in initializeSpeaker() if playback is enabled
 
@@ -106,6 +108,8 @@ class TranscriptionProxy {
   private audioVisualizer: AudioVisualizer;
   private speaker: any = null;
   private isPlaybackReady: boolean = false;
+  private lastRecordingPath: string | null = null;
+  private lastRecordingSize: number = 0;
 
   constructor(mode: string = "Proxy") {
     // Single WebSocket server
@@ -256,13 +260,13 @@ class TranscriptionProxy {
 
     // Initialize Gladia session if not already active
     if (!this.isGladiaSessionActive) {
-      logger.info("Initializing Gladia transcription session...");
+      logger.info("🔄 Initializing transcription session...");
       this.gladiaClient.initSession().then((success) => {
         this.isGladiaSessionActive = success;
         if (success) {
-          logger.info("Gladia transcription session ready");
+          logger.info("✅ Transcription session ready and active!");
         } else {
-          logger.error("Failed to initialize Gladia transcription session");
+          logger.error("❌ Failed to initialize transcription session");
         }
       });
     }
@@ -314,16 +318,31 @@ class TranscriptionProxy {
             logger.info(`Message from MeetingBaas: ${inspectMessage(message)}`);
           }
         } catch {
-          // Likely audio data, send to Gladia for transcription
+          // Likely audio data, send to transcription provider
+          const audioBuffer = Buffer.isBuffer(message) ? message : Buffer.from(message);
+
+          processLogger?.debug(
+            `Received audio chunk from MeetingBaas`,
+            "Proxy",
+            { size: audioBuffer.length, isGladiaActive: this.isGladiaSessionActive }
+          );
+
           if (this.isGladiaSessionActive) {
-            this.gladiaClient.sendAudioChunk(message);
+            processLogger?.debug(`Sending audio chunk to Gladia`, "Proxy", { size: audioBuffer.length });
+            this.gladiaClient.sendAudioChunk(audioBuffer).catch((error) => {
+              logger.error("❌ Error sending audio chunk to transcription:", error);
+              processLogger?.error(`Failed to send audio chunk to Gladia`, "Proxy", { error: error.message });
+            });
+          } else {
+            logger.warn(`⚠️ Transcription session not active yet, dropping audio chunk`);
+            processLogger?.warn(`Gladia session not active, dropping audio chunk`, "Proxy");
           }
 
           // Update audio visualizer (no buffering, so buffer pressure always 0)
-          this.audioVisualizer.update(message, this.lastSpeaker || undefined, 0);
+          this.audioVisualizer.update(audioBuffer, this.lastSpeaker || undefined, 0);
 
           // Play audio directly through speakers if enabled (no buffering)
-          this.playAudio(message);
+          this.playAudio(audioBuffer);
 
           // Store audio buffer if recording is enabled
           if (proxyConfig.recording.enabled) {
@@ -429,6 +448,10 @@ class TranscriptionProxy {
       const wavFile = Buffer.concat([wavHeader, audioData]);
       fs.writeFileSync(filepath, wavFile);
 
+      // Store the recording info
+      this.lastRecordingPath = filepath;
+      this.lastRecordingSize = wavFile.length;
+
       logger.info(`Audio saved to: ${filepath} (${audioData.length} bytes)`);
     } catch (error) {
       logger.error("Error saving audio file:", error);
@@ -479,6 +502,26 @@ class TranscriptionProxy {
         resolve();
       });
     });
+  }
+
+  /**
+   * Get information about the last transcript session
+   */
+  public getLastTranscriptInfo(): { sessionDir: string; transcriptCount: number; duration: number } | null {
+    return this.gladiaClient.getLastTranscriptInfo();
+  }
+
+  /**
+   * Get information about the last audio recording
+   */
+  public getLastRecordingInfo(): { path: string; size: number } | null {
+    if (this.lastRecordingPath) {
+      return {
+        path: this.lastRecordingPath,
+        size: this.lastRecordingSize,
+      };
+    }
+    return null;
   }
 }
 

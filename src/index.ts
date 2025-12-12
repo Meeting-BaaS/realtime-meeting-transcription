@@ -1,13 +1,20 @@
 import { MeetingBaasClient } from "./meetingbaas";
 import { TranscriptionProxy } from "./proxy";
-import { proxyConfig } from "./config";
+import { proxyConfig, webhookConfig } from "./config";
 import { createLogger } from "./utils";
+import { WebhookHandler } from "./webhookHandler";
+import { initProcessLogger, closeProcessLogger } from "./processLogger";
 
 const logger = createLogger("Main");
+
+// Initialize process logger
+const processLogger = initProcessLogger("./logs", true);
+processLogger.info("Application starting", "Main");
 
 // Keep references to all our clients for cleanup
 let meetingBaasClient: MeetingBaasClient | null = null;
 let proxy: TranscriptionProxy | null = null;
+let webhookHandler: WebhookHandler | null = null;
 
 type Mode = "local" | "remote";
 
@@ -16,21 +23,126 @@ function setupGracefulShutdown() {
   process.on("SIGINT", async () => {
     logger.info("Shutting down gracefully...");
 
+    // Stop webhook server
+    if (webhookHandler) {
+      logger.info("Stopping webhook server...");
+      await webhookHandler.stop();
+    }
+
     // Disconnect from MeetingBaas (remove the bot from the meeting)
     if (meetingBaasClient) {
       logger.info("Telling remote bot to leave the meeting...");
       await meetingBaasClient.disconnect();
     }
 
-    // Close Gladia connections (via proxy)
+    // Close transcription services (via proxy)
     if (proxy) {
       logger.info("Closing transcription services...");
       await proxy.shutdown();
     }
 
+    // Get data locations before closing loggers
+    const processLogPath = processLogger?.getLogFilePath();
+    const transcriptInfo = proxy?.getLastTranscriptInfo();
+    const recordingInfo = proxy?.getLastRecordingInfo();
+
+    // Close process logger
+    logger.info("Closing process logger...");
+    closeProcessLogger();
+
+    // Display summary of stored data
+    displayDataStorageSummary(processLogPath, transcriptInfo, recordingInfo);
+
     logger.info("Cleanup complete, exiting...");
     process.exit(0);
   });
+}
+
+// Display a summary of where external data has been stored
+function displayDataStorageSummary(
+  processLogPath?: string,
+  transcriptInfo?: { sessionDir: string; transcriptCount: number; duration: number } | null,
+  recordingInfo?: { path: string; size: number } | null
+) {
+  console.log("\n");
+  console.log("╔═══════════════════════════════════════════════════════════════════╗");
+  console.log("║                    📁 DATA STORAGE SUMMARY                        ║");
+  console.log("╚═══════════════════════════════════════════════════════════════════╝");
+  console.log("");
+
+  // Process logs
+  if (processLogPath) {
+    console.log("📝 Process Logs:");
+    console.log(`   ${processLogPath}`);
+    console.log("");
+  }
+
+  // Transcript sessions
+  if (transcriptInfo) {
+    console.log("💬 Transcription Session:");
+    console.log(`   ${transcriptInfo.sessionDir}`);
+    console.log(`   • Duration: ${transcriptInfo.duration.toFixed(2)}s`);
+    console.log(`   • Transcripts: ${transcriptInfo.transcriptCount}`);
+    console.log(`   • Files: transcript.json, transcript.txt, raw_logs.txt, session_info.txt`);
+    console.log("");
+  } else if (proxyConfig.transcriptLogging.enabled) {
+    console.log("💬 Transcription Sessions:");
+    console.log(`   ${proxyConfig.transcriptLogging.outputDir}/sessions/`);
+    console.log(`   (No sessions in this run)`);
+    console.log("");
+  }
+
+  // Audio recordings
+  if (recordingInfo) {
+    console.log("🎤 Audio Recording:");
+    console.log(`   ${recordingInfo.path}`);
+    console.log(`   • Size: ${(recordingInfo.size / 1024 / 1024).toFixed(2)} MB`);
+    console.log("");
+  } else if (proxyConfig.recording.enabled) {
+    console.log("🎤 Audio Recordings:");
+    console.log(`   ${proxyConfig.recording.outputDir}/`);
+    console.log(`   (No recordings in this run)`);
+    console.log("");
+  }
+
+  // Configuration status
+  console.log("⚙️  Configuration:");
+  console.log(`   • Transcript Logging: ${proxyConfig.transcriptLogging.enabled ? "ENABLED" : "DISABLED"}`);
+  console.log(`   • Audio Recording: ${proxyConfig.recording.enabled ? "ENABLED" : "DISABLED"}`);
+  console.log(`   • Audio Playback: ${proxyConfig.playback.enabled ? "ENABLED" : "DISABLED"}`);
+  console.log("");
+
+  console.log("═══════════════════════════════════════════════════════════════════");
+  console.log("");
+}
+
+// Initialize webhook server if enabled
+async function startWebhookServer() {
+  if (!webhookConfig.enabled) {
+    logger.info("Webhook server disabled (set ENABLE_WEBHOOKS=true to enable)");
+    return;
+  }
+
+  try {
+    webhookHandler = new WebhookHandler();
+
+    // Register event handlers for different webhook events
+    webhookHandler.on("transcription.completed", (event) => {
+      logger.info(`Webhook: Transcription ${event.data?.id} completed`);
+      // Add custom logic here (e.g., save to database, send notification)
+    });
+
+    webhookHandler.on("transcription.failed", (event) => {
+      logger.error(`Webhook: Transcription ${event.data?.id} failed: ${event.data?.error}`);
+      // Add custom error handling here
+    });
+
+    await webhookHandler.start();
+    logger.info("✅ Webhook server started successfully");
+  } catch (error: any) {
+    logger.error(`Failed to start webhook server: ${error.message}`);
+    logger.warn("Continuing without webhook server...");
+  }
 }
 
 function showUsage() {
@@ -70,6 +182,9 @@ async function runLocalMode() {
   // Create proxy only
   proxy = new TranscriptionProxy("Local");
 
+  // Start webhook server if enabled
+  await startWebhookServer();
+
   // Setup graceful shutdown
   setupGracefulShutdown();
 
@@ -87,6 +202,9 @@ async function runRemoteMode(
   // Create proxy and MeetingBaas client
   proxy = new TranscriptionProxy("Remote");
   meetingBaasClient = new MeetingBaasClient();
+
+  // Start webhook server if enabled
+  await startWebhookServer();
 
   // Setup graceful shutdown
   setupGracefulShutdown();
