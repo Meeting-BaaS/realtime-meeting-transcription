@@ -266,8 +266,55 @@ class TranscriptionProxy {
         if (success) {
           logger.info("✅ Transcription session ready and active!");
         } else {
-          logger.error("❌ Failed to initialize transcription session");
+          // Get error message and truncate to 128 chars
+          const rawError = this.gladiaClient.getLastError();
+          const errorMsg = rawError ? rawError.substring(0, 128) : "Unknown error";
+          const displayMsg = `Failed with message: ${errorMsg}`;
+
+          logger.error("❌ Failed to initialize transcription session:", displayMsg);
+
+          // Print to stderr so it's visible even if TUI fails
+          console.error("\n");
+          console.error("╔════════════════════════════════════════════════════════════════╗");
+          console.error("║                    ⚠️  CRITICAL ERROR  ⚠️                     ║");
+          console.error("╠════════════════════════════════════════════════════════════════╣");
+          console.error("║                                                                ║");
+          console.error(`║  ${displayMsg.substring(0, 62).padEnd(62)}║`);
+          console.error("║                                                                ║");
+          console.error("║       Bot will exit the meeting in 3 seconds...                ║");
+          console.error("║                                                                ║");
+          console.error("╚════════════════════════════════════════════════════════════════╝");
+          console.error("\n");
+
+          // Show error in TUI
+          this.audioVisualizer?.showError(displayMsg);
+
+          // Gracefully shutdown
+          this.handleTranscriptionError();
         }
+      }).catch((error) => {
+        // Get error message and truncate to 128 chars
+        const rawError = error.message || String(error);
+        const errorMsg = rawError.substring(0, 128);
+        const displayMsg = `Failed with message: ${errorMsg}`;
+
+        logger.error("❌ Transcription initialization threw exception:", displayMsg);
+
+        // Print to stderr so it's visible even if TUI fails
+        console.error("\n");
+        console.error("╔════════════════════════════════════════════════════════════════╗");
+        console.error("║                    ⚠️  CRITICAL ERROR  ⚠️                     ║");
+        console.error("╠════════════════════════════════════════════════════════════════╣");
+        console.error("║                                                                ║");
+        console.error(`║  ${displayMsg.substring(0, 62).padEnd(62)}║`);
+        console.error("║                                                                ║");
+        console.error("║       Bot will exit the meeting in 3 seconds...                ║");
+        console.error("║                                                                ║");
+        console.error("╚════════════════════════════════════════════════════════════════╝");
+        console.error("\n");
+
+        this.audioVisualizer?.showError(displayMsg);
+        this.handleTranscriptionError();
       });
     }
 
@@ -456,6 +503,43 @@ class TranscriptionProxy {
     } catch (error) {
       logger.error("Error saving audio file:", error);
     }
+  }
+
+  /**
+   * Handle transcription initialization error
+   * Gracefully shuts down the app and exits the meeting
+   */
+  private handleTranscriptionError(): void {
+    logger.error("🛑 Transcription service failed - initiating graceful shutdown");
+
+    // Give time for error message to be visible in TUI
+    setTimeout(async () => {
+      // Close all client connections
+      for (const client of this.meetingBaasClients) {
+        try {
+          client.close();
+        } catch (error) {
+          logger.error("Error closing client connection:", error);
+        }
+      }
+      this.meetingBaasClients.clear();
+
+      if (this.botClient) {
+        try {
+          this.botClient.close();
+        } catch (error) {
+          logger.error("Error closing bot connection:", error);
+        }
+        this.botClient = null;
+      }
+
+      // Shutdown proxy (saves audio, ends transcription session, etc.)
+      await this.shutdown();
+
+      // Exit process
+      logger.info("Exiting due to transcription error");
+      process.exit(1);
+    }, 3000); // Wait 3 seconds so user can see the error
   }
 
   public async shutdown(): Promise<void> {

@@ -805,6 +805,114 @@ export class AudioVisualizer {
   }
 
   /**
+   * Show error message in the TUI
+   */
+  public showError(errorMessage: string): void {
+    if (!this.isEnabled) return;
+
+    // Add error to logs buffer
+    this.logsBuffer.push({
+      text: `ERROR: ${errorMessage}`,
+      timestamp: Date.now(),
+      level: 'error'
+    });
+
+    // Keep only recent logs
+    if (this.logsBuffer.length > this.MAX_LOGS) {
+      this.logsBuffer.shift();
+    }
+
+    // Render dashboard to show error
+    this.renderDashboard();
+
+    // Display prominent error overlay centered on screen
+    this.renderErrorOverlay(errorMessage);
+  }
+
+  /**
+   * Render a prominent error overlay that's impossible to miss
+   */
+  private renderErrorOverlay(errorMessage: string): void {
+    const boxWidth = Math.min(80, this.termWidth - 10);
+    const boxHeight = 10;
+    const x = Math.floor((this.termWidth - boxWidth) / 2);
+    const y = Math.floor((this.termHeight - boxHeight) / 2);
+
+    // Draw error box with red background
+    const redBg = "\x1b[41m\x1b[97m\x1b[1m"; // Red background, white text, bold
+    const reset = "\x1b[0m";
+    const border = "═";
+    const vBorder = "║";
+
+    // Top border
+    this.writeAt(x, y, `╔${"═".repeat(boxWidth - 2)}╗`, redBg);
+
+    // Title
+    const title = "⚠️  CRITICAL ERROR  ⚠️";
+    const titlePadding = Math.floor((boxWidth - title.length - 2) / 2);
+    this.writeAt(x, y + 1, `${vBorder}${" ".repeat(titlePadding)}${title}${" ".repeat(boxWidth - titlePadding - title.length - 2)}${vBorder}`, redBg);
+
+    // Separator
+    this.writeAt(x, y + 2, `╠${"═".repeat(boxWidth - 2)}╣`, redBg);
+
+    // Error message - wrap text if needed
+    const maxTextWidth = boxWidth - 6;
+    const wrappedLines = this.wrapText(errorMessage, maxTextWidth);
+
+    let lineNum = 3;
+    for (const line of wrappedLines.slice(0, 3)) { // Max 3 lines
+      const padding = Math.floor((boxWidth - line.length - 2) / 2);
+      this.writeAt(x, y + lineNum, `${vBorder}${" ".repeat(padding)}${line}${" ".repeat(boxWidth - padding - line.length - 2)}${vBorder}`, redBg);
+      lineNum++;
+    }
+
+    // Empty line
+    this.writeAt(x, y + lineNum, `${vBorder}${" ".repeat(boxWidth - 2)}${vBorder}`, redBg);
+    lineNum++;
+
+    // Shutdown message
+    const shutdownMsg = "Bot will exit in 3 seconds...";
+    const shutdownPadding = Math.floor((boxWidth - shutdownMsg.length - 2) / 2);
+    this.writeAt(x, y + lineNum, `${vBorder}${" ".repeat(shutdownPadding)}${shutdownMsg}${" ".repeat(boxWidth - shutdownPadding - shutdownMsg.length - 2)}${vBorder}`, redBg);
+    lineNum++;
+
+    // Bottom border
+    this.writeAt(x, y + lineNum, `╚${"═".repeat(boxWidth - 2)}╝`, redBg);
+
+    // Reset colors
+    process.stdout.write(reset);
+
+    // Flush immediately so error is visible
+    this.flushWrites();
+  }
+
+  /**
+   * Wrap text to fit within specified width
+   */
+  private wrapText(text: string, maxWidth: number): string[] {
+    const words = text.split(' ');
+    const lines: string[] = [];
+    let currentLine = '';
+
+    for (const word of words) {
+      if (currentLine.length + word.length + 1 <= maxWidth) {
+        currentLine += (currentLine.length > 0 ? ' ' : '') + word;
+      } else {
+        if (currentLine.length > 0) {
+          lines.push(currentLine);
+        }
+        currentLine = word;
+      }
+    }
+
+    if (currentLine.length > 0) {
+      lines.push(currentLine);
+    }
+
+    return lines.length > 0 ? lines : [text.substring(0, maxWidth)];
+  }
+
+  /**
    * Clean up and restore terminal
    */
   /**
