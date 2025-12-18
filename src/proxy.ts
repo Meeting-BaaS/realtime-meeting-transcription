@@ -1,11 +1,14 @@
 import WebSocket from "ws";
+import http from "http";
+import express, { Request, Response } from "express";
 import { proxyConfig } from "./config";
 import { GladiaClient } from "./gladia";
 import { createLogger } from "./utils";
-import { AudioVisualizer } from "./audioVisualizer";
+import { AudioVisualizer, getTUI } from "./audioVisualizer";
 import { getProcessLogger } from "./processLogger";
 import * as fs from "fs";
 import * as path from "path";
+import type { MeetingBaasWebhookEvent } from "./webhookHandler";
 
 const logger = createLogger("Proxy");
 const processLogger = getProcessLogger();
@@ -97,6 +100,8 @@ function inspectMessage(message: Buffer | string | unknown): string {
 }
 
 class TranscriptionProxy {
+  private app: express.Application;
+  private httpServer: http.Server;
   private server: WebSocket.Server;
   private botClient: WebSocket | null = null;
   private meetingBaasClients: Set<WebSocket> = new Set();
@@ -110,16 +115,60 @@ class TranscriptionProxy {
   private isPlaybackReady: boolean = false;
   private lastRecordingPath: string | null = null;
   private lastRecordingSize: number = 0;
+  private meetingBaasHandlers: Map<
+    string,
+    (event: MeetingBaasWebhookEvent) => void | Promise<void>
+  > = new Map();
+  private waitingForRecordingStatus: boolean = true;
+  private transcriptionInitialized: boolean = false;
+  private mode: string;
 
   constructor(mode: string = "Proxy") {
-    // Single WebSocket server
+    this.mode = mode;
+
+    // In local mode, don't wait for recording status webhook - start transcription immediately
+    // In remote mode, wait for bot.status_change webhook with in_call_not_recording status
+    if (mode === "Local") {
+      this.waitingForRecordingStatus = false;
+      logger.info("Local mode: will start transcription immediately on connection");
+    } else {
+      this.waitingForRecordingStatus = true;
+      logger.info("Remote mode: will wait for in_call_not_recording status before starting transcription");
+    }
+
+    // Create Express app for HTTP endpoints
+    this.app = express();
+    this.app.use(express.json());
+
+    // Setup webhook routes
+    this.setupWebhookRoutes();
+
+    // Create HTTP server
+    this.httpServer = http.createServer(this.app);
+
+    // Attach WebSocket server to HTTP server
     this.server = new WebSocket.Server({
-      host: proxyConfig.host,
-      port: proxyConfig.port,
+      server: this.httpServer,
+    });
+
+    // Start listening
+    this.httpServer.listen(proxyConfig.port, proxyConfig.host, () => {
+      logger.info(`Proxy server started on ${proxyConfig.host}:${proxyConfig.port}`);
+      logger.info(`WebSocket endpoint: ws://${proxyConfig.host}:${proxyConfig.port}`);
+      logger.info(`Webhook endpoint: http://${proxyConfig.host}:${proxyConfig.port}/webhooks/meetingbaas`);
     });
 
     this.gladiaClient = new GladiaClient();
-    this.audioVisualizer = new AudioVisualizer(mode, proxyConfig.port);
+
+    // Use the TUI singleton (initialized in index.ts) and update its config
+    const tui = getTUI();
+    if (tui) {
+      tui.setConfig(mode, proxyConfig.port);
+      this.audioVisualizer = tui;
+    } else {
+      // Fallback: create new instance if TUI wasn't initialized (shouldn't happen)
+      this.audioVisualizer = new AudioVisualizer(mode, proxyConfig.port);
+    }
 
     // Initialize speaker for audio playback if enabled
     if (proxyConfig.playback.enabled) {
@@ -148,10 +197,6 @@ class TranscriptionProxy {
       }
     });
 
-    logger.info(
-      `Proxy server started on ${proxyConfig.host}:${proxyConfig.port}`
-    );
-
     this.server.on("connection", (ws) => {
       logger.info("New connection established");
 
@@ -170,6 +215,207 @@ class TranscriptionProxy {
         }
       });
     });
+  }
+
+  /**
+   * Setup webhook routes for MeetingBaas events
+   */
+  private setupWebhookRoutes(): void {
+    // Health check endpoint
+    this.app.get("/health", (req: Request, res: Response) => {
+      res.status(200).json({
+        status: "healthy",
+        service: "transcription-proxy",
+        timestamp: new Date().toISOString(),
+      });
+    });
+
+    // MeetingBaas webhook endpoint
+    this.app.post("/webhooks/meetingbaas", async (req: Request, res: Response) => {
+      try {
+        logger.info("Received MeetingBaas webhook");
+        processLogger?.info("Received MeetingBaas webhook", "Proxy", { body: req.body });
+
+        const event = req.body as MeetingBaasWebhookEvent;
+
+        if (!event.event) {
+          logger.error("Invalid MeetingBaas webhook: missing event type");
+          return res.status(400).json({
+            error: "Invalid webhook payload",
+            details: "Missing event type",
+          });
+        }
+
+        // Process the webhook event
+        await this.processMeetingBaasWebhook(event);
+
+        res.status(200).json({
+          received: true,
+          event: event.event,
+        });
+      } catch (error: any) {
+        logger.error("Error processing MeetingBaas webhook:", error.message);
+        res.status(500).json({
+          error: "Internal server error",
+          details: error.message,
+        });
+      }
+    });
+  }
+
+  /**
+   * Process MeetingBaas webhook events
+   */
+  private async processMeetingBaasWebhook(event: MeetingBaasWebhookEvent): Promise<void> {
+    const { event: eventType, data } = event;
+
+    logger.info(`MeetingBaas event: ${eventType}`);
+    processLogger?.info(`Processing MeetingBaas event: ${eventType}`, "Proxy", { data });
+
+    // Add to visualizer logs
+    this.audioVisualizer.addLog(`MeetingBaas: ${eventType}`, "info");
+
+    switch (eventType) {
+      case "bot.joining":
+        logger.info("Bot is joining the meeting...");
+        break;
+
+      case "bot.in_waiting_room":
+        logger.info("Bot is in the waiting room");
+        this.audioVisualizer.addLog("Bot in waiting room", "info");
+        break;
+
+      case "bot.joined":
+        logger.info(`Bot joined meeting: ${data?.meeting_url || "unknown"}`);
+        this.audioVisualizer.addLog("Bot joined meeting", "info");
+        break;
+
+      case "bot.left":
+        logger.info("Bot left the meeting");
+        this.audioVisualizer.addLog("Bot left meeting", "info");
+        break;
+
+      case "bot.recording_permission_allowed":
+        logger.info("Recording permission granted");
+        this.audioVisualizer.addLog("Recording permission granted", "info");
+        break;
+
+      case "bot.recording_permission_denied":
+        logger.warn("Recording permission denied");
+        this.audioVisualizer.addLog("Recording permission DENIED", "error");
+        break;
+
+      case "recording.started":
+        logger.info("Recording started");
+        this.audioVisualizer.addLog("Recording started", "info");
+        break;
+
+      case "recording.ready":
+        logger.info(`Recording ready: ${data?.recording_url || "URL not available"}`);
+        this.audioVisualizer.addLog(`Recording ready`, "info");
+        break;
+
+      case "recording.failed":
+        logger.error(`Recording failed: ${data?.error || "unknown error"}`);
+        this.audioVisualizer.addLog(`Recording failed: ${data?.error}`, "error");
+        break;
+
+      case "transcription.ready":
+        logger.info("Async transcription ready!");
+        if (data?.transcript?.text) {
+          const preview = data.transcript.text.substring(0, 100);
+          logger.info(`Transcript preview: ${preview}...`);
+        }
+        if (data?.transcript_url) {
+          logger.info(`Transcript URL: ${data.transcript_url}`);
+        }
+        this.audioVisualizer.addLog("Async transcription ready!", "info");
+        break;
+
+      case "transcription.failed":
+        logger.error(`Async transcription failed: ${data?.error || "unknown error"}`);
+        this.audioVisualizer.addLog(`Transcription failed: ${data?.error}`, "error");
+        break;
+
+      case "meeting.ended":
+        logger.info("Meeting has ended");
+        this.audioVisualizer.addLog("Meeting ended", "info");
+        break;
+
+      case "bot.status_change":
+        // status can be a string or an object with code property
+        const statusObj = data?.status;
+        const statusCode = typeof statusObj === "object" && statusObj !== null ? statusObj.code : statusObj;
+        logger.info(`Bot status: ${statusCode}`);
+        this.audioVisualizer.addLog(`Bot: ${statusCode}`, "info");
+
+        // Handle specific status codes
+        switch (statusCode) {
+          case "joining_call":
+            this.audioVisualizer.addLog("Bot joining call...", "info");
+            break;
+          case "in_waiting_room":
+            this.audioVisualizer.addLog("Bot in waiting room", "info");
+            break;
+          case "in_call_not_recording":
+            this.audioVisualizer.addLog("Bot in call (audio connected)", "info");
+            // Audio is connected - start transcription now to not miss any audio
+            if (this.waitingForRecordingStatus && !this.transcriptionInitialized) {
+              logger.info("🎙️ Bot audio connected - starting transcription session");
+              this.audioVisualizer.addLog("Audio connected - starting transcription", "info");
+              this.waitingForRecordingStatus = false;
+              this.initializeTranscriptionSession();
+            }
+            break;
+          case "in_call_recording":
+            this.audioVisualizer.addLog("Bot recording started!", "info");
+            break;
+          case "call_ended":
+            this.audioVisualizer.addLog("Call ended", "info");
+            break;
+          default:
+            this.audioVisualizer.addLog(`Bot status: ${statusCode}`, "info");
+        }
+        break;
+
+      default:
+        logger.info(`MeetingBaas event: ${eventType}`);
+        this.audioVisualizer.addLog(`MeetingBaas: ${eventType}`, "info");
+        if (data) {
+          logger.info(`Event data: ${JSON.stringify(data, null, 2)}`);
+        }
+    }
+
+    // Call registered handlers
+    const handler = this.meetingBaasHandlers.get(eventType);
+    if (handler) {
+      try {
+        await handler(event);
+      } catch (error: any) {
+        logger.error(`Error in MeetingBaas handler for ${eventType}:`, error.message);
+      }
+    }
+
+    // Call wildcard handler
+    const wildcardHandler = this.meetingBaasHandlers.get("*");
+    if (wildcardHandler) {
+      try {
+        await wildcardHandler(event);
+      } catch (error: any) {
+        logger.error("Error in MeetingBaas wildcard handler:", error.message);
+      }
+    }
+  }
+
+  /**
+   * Register a handler for MeetingBaas webhook events
+   */
+  public onMeetingBaas(
+    eventType: string,
+    handler: (event: MeetingBaasWebhookEvent) => void | Promise<void>
+  ): void {
+    this.meetingBaasHandlers.set(eventType, handler);
+    logger.info(`Registered MeetingBaas handler for: ${eventType}`);
   }
 
   /**
@@ -258,64 +504,13 @@ class TranscriptionProxy {
     logger.info("MeetingBaas client connected");
     this.meetingBaasClients.add(ws);
 
-    // Initialize Gladia session if not already active
-    if (!this.isGladiaSessionActive) {
-      logger.info("🔄 Initializing transcription session...");
-      this.gladiaClient.initSession().then((success) => {
-        this.isGladiaSessionActive = success;
-        if (success) {
-          logger.info("✅ Transcription session ready and active!");
-        } else {
-          // Get error message and truncate to 128 chars
-          const rawError = this.gladiaClient.getLastError();
-          const errorMsg = rawError ? rawError.substring(0, 128) : "Unknown error";
-          const displayMsg = `Failed with message: ${errorMsg}`;
-
-          logger.error("❌ Failed to initialize transcription session:", displayMsg);
-
-          // Print to stderr so it's visible even if TUI fails
-          console.error("\n");
-          console.error("╔════════════════════════════════════════════════════════════════╗");
-          console.error("║                    ⚠️  CRITICAL ERROR  ⚠️                     ║");
-          console.error("╠════════════════════════════════════════════════════════════════╣");
-          console.error("║                                                                ║");
-          console.error(`║  ${displayMsg.substring(0, 62).padEnd(62)}║`);
-          console.error("║                                                                ║");
-          console.error("║       Bot will exit the meeting in 3 seconds...                ║");
-          console.error("║                                                                ║");
-          console.error("╚════════════════════════════════════════════════════════════════╝");
-          console.error("\n");
-
-          // Show error in TUI
-          this.audioVisualizer?.showError(displayMsg);
-
-          // Gracefully shutdown
-          this.handleTranscriptionError();
-        }
-      }).catch((error) => {
-        // Get error message and truncate to 128 chars
-        const rawError = error.message || String(error);
-        const errorMsg = rawError.substring(0, 128);
-        const displayMsg = `Failed with message: ${errorMsg}`;
-
-        logger.error("❌ Transcription initialization threw exception:", displayMsg);
-
-        // Print to stderr so it's visible even if TUI fails
-        console.error("\n");
-        console.error("╔════════════════════════════════════════════════════════════════╗");
-        console.error("║                    ⚠️  CRITICAL ERROR  ⚠️                     ║");
-        console.error("╠════════════════════════════════════════════════════════════════╣");
-        console.error("║                                                                ║");
-        console.error(`║  ${displayMsg.substring(0, 62).padEnd(62)}║`);
-        console.error("║                                                                ║");
-        console.error("║       Bot will exit the meeting in 3 seconds...                ║");
-        console.error("║                                                                ║");
-        console.error("╚════════════════════════════════════════════════════════════════╝");
-        console.error("\n");
-
-        this.audioVisualizer?.showError(displayMsg);
-        this.handleTranscriptionError();
-      });
+    // Don't initialize transcription immediately - wait for in_call_not_recording status via webhook
+    if (this.waitingForRecordingStatus) {
+      logger.info("⏳ Waiting for bot to reach 'in_call_not_recording' status before starting transcription...");
+      this.audioVisualizer.addLog("Waiting for recording status...", "info");
+    } else {
+      // If not waiting (e.g., local mode without webhooks), initialize immediately
+      this.initializeTranscriptionSession();
     }
 
     // Set recording start time if recording is enabled
@@ -423,6 +618,11 @@ class TranscriptionProxy {
           this.isGladiaSessionActive = false;
         }
 
+        // Reset transcription state for next connection
+        this.transcriptionInitialized = false;
+        // Only wait for recording status in remote mode
+        this.waitingForRecordingStatus = this.mode !== "Local";
+
         // Show disconnection message
         logger.info("All clients disconnected. Waiting for new connections...");
       }
@@ -430,6 +630,78 @@ class TranscriptionProxy {
 
     ws.on("error", (error) => {
       logger.error("MeetingBaas client error:", error);
+    });
+  }
+
+  /**
+   * Initialize the transcription session
+   * Called either immediately (local mode) or when bot.status_change indicates in_call_not_recording
+   */
+  private initializeTranscriptionSession(): void {
+    if (this.transcriptionInitialized || this.isGladiaSessionActive) {
+      logger.info("Transcription session already initialized, skipping");
+      return;
+    }
+
+    this.transcriptionInitialized = true;
+    logger.info("🔄 Initializing transcription session...");
+    this.audioVisualizer.addLog("Starting transcription...", "info");
+
+    this.gladiaClient.initSession().then((success) => {
+      this.isGladiaSessionActive = success;
+      if (success) {
+        logger.info("✅ Transcription session ready and active!");
+        this.audioVisualizer.addLog("Transcription active!", "info");
+      } else {
+        // Get error message and truncate to 128 chars
+        const rawError = this.gladiaClient.getLastError();
+        const errorMsg = rawError ? rawError.substring(0, 128) : "Unknown error";
+        const displayMsg = `Failed with message: ${errorMsg}`;
+
+        logger.error("❌ Failed to initialize transcription session:", displayMsg);
+
+        // Print to stderr so it's visible even if TUI fails
+        console.error("\n");
+        console.error("╔════════════════════════════════════════════════════════════════╗");
+        console.error("║                    ⚠️  CRITICAL ERROR  ⚠️                     ║");
+        console.error("╠════════════════════════════════════════════════════════════════╣");
+        console.error("║                                                                ║");
+        console.error(`║  ${displayMsg.substring(0, 62).padEnd(62)}║`);
+        console.error("║                                                                ║");
+        console.error("║       Bot will exit the meeting in 3 seconds...                ║");
+        console.error("║                                                                ║");
+        console.error("╚════════════════════════════════════════════════════════════════╝");
+        console.error("\n");
+
+        // Show error in TUI
+        this.audioVisualizer?.showError(displayMsg);
+
+        // Gracefully shutdown
+        this.handleTranscriptionError();
+      }
+    }).catch((error) => {
+      // Get error message and truncate to 128 chars
+      const rawError = error.message || String(error);
+      const errorMsg = rawError.substring(0, 128);
+      const displayMsg = `Failed with message: ${errorMsg}`;
+
+      logger.error("❌ Transcription initialization threw exception:", displayMsg);
+
+      // Print to stderr so it's visible even if TUI fails
+      console.error("\n");
+      console.error("╔════════════════════════════════════════════════════════════════╗");
+      console.error("║                    ⚠️  CRITICAL ERROR  ⚠️                     ║");
+      console.error("╠════════════════════════════════════════════════════════════════╣");
+      console.error("║                                                                ║");
+      console.error(`║  ${displayMsg.substring(0, 62).padEnd(62)}║`);
+      console.error("║                                                                ║");
+      console.error("║       Bot will exit the meeting in 3 seconds...                ║");
+      console.error("║                                                                ║");
+      console.error("╚════════════════════════════════════════════════════════════════╝");
+      console.error("\n");
+
+      this.audioVisualizer?.showError(displayMsg);
+      this.handleTranscriptionError();
     });
   }
 
@@ -543,8 +815,7 @@ class TranscriptionProxy {
   }
 
   public async shutdown(): Promise<void> {
-    // Cleanup visualizer
-    this.audioVisualizer.cleanup();
+    // Note: TUI cleanup is handled by index.ts (cleanupTUI) since it's a singleton
 
     // Stop audio playback
     if (this.speaker) {

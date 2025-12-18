@@ -1,4 +1,4 @@
-import { createBaasClient } from "@meeting-baas/sdk";
+import { createBaasClient, type BaasClientV1Methods } from "@meeting-baas/sdk";
 import { apiKeys, apiUrls } from "./config";
 import { createLogger } from "./utils";
 import { getProcessLogger } from "./processLogger";
@@ -7,13 +7,14 @@ const logger = createLogger("MeetingBaas");
 const processLogger = getProcessLogger();
 
 class MeetingBaasClient {
-  private client: ReturnType<typeof createBaasClient>;
+  private client: BaasClientV1Methods;
   private botId: string | null = null;
 
   constructor() {
     this.client = createBaasClient({
       api_key: apiKeys.meetingBaas,
       base_url: apiUrls.meetingBaas,
+      api_version: "v1",
     });
 
     logger.info(`Initialized MeetingBaas SDK client with base URL: ${apiUrls.meetingBaas}`);
@@ -126,7 +127,9 @@ class MeetingBaasClient {
 
   public async disconnect(): Promise<void> {
     if (this.botId) {
+      logger.info(`Requesting bot ${this.botId} to leave meeting...`);
       try {
+        // SDK v6 uses bot_id parameter
         const result = await this.client.leaveMeeting({
           uuid: this.botId,
         });
@@ -134,13 +137,15 @@ class MeetingBaasClient {
         if (result.success) {
           logger.info(`Bot ${this.botId} successfully left the meeting`);
         } else {
-          logger.error("Error leaving meeting:", result.error);
+          logger.error(`Failed to leave meeting: ${JSON.stringify(result.error)}`);
         }
-      } catch (error) {
-        logger.error("Error leaving meeting:", error);
+      } catch (error: any) {
+        logger.error(`Exception leaving meeting: ${error.message || error}`);
       }
 
       this.botId = null;
+    } else {
+      logger.info("No bot ID to disconnect - bot may not have been created");
     }
   }
 

@@ -80,67 +80,183 @@ export class AudioVisualizer {
   private cachedTimeline: string = "";
   private lastTimelineRender: number = 0;
 
+  // Log rate limiting - track last log time per log type/prefix
+  private logRateLimits: Map<string, { lastTime: number; count: number }> = new Map();
+  private readonly LOG_RATE_LIMIT_MS: number = 1000; // Max 1 log per second per type
+
+  // Original stdout/stderr write functions (saved before interception)
+  private originalStdoutWrite: typeof process.stdout.write;
+  private originalStderrWrite: typeof process.stderr.write;
+
   constructor(mode: string = "Proxy", port: number = 4040) {
+    // Save original write functions FIRST, before any interception
+    this.originalStdoutWrite = process.stdout.write.bind(process.stdout);
+    this.originalStderrWrite = process.stderr.write.bind(process.stderr);
     this.mode = mode;
     this.port = port;
 
     // Clear screen and hide cursor for smooth updates
     if (this.isEnabled) {
       this.updateTerminalSize();
-      process.stdout.write("\x1b[2J\x1b[H\x1b[?25l");
+      this.originalStdoutWrite("\x1b[2J\x1b[H\x1b[?25l");
 
       // Update terminal size on resize
       process.stdout.on('resize', () => {
         this.updateTerminalSize();
       });
 
-      // Intercept stderr to capture error logs
-      this.interceptStderr();
+      // Intercept stdout and stderr to capture all logs
+      this.interceptConsoleOutput();
     }
   }
 
   /**
-   * Intercept stderr to capture logs
+   * Intercept stdout and stderr to capture all logs in the TUI
    */
-  private interceptStderr(): void {
-    const originalStderrWrite = process.stderr.write.bind(process.stderr);
+  private interceptConsoleOutput(): void {
+    // Filter patterns for noisy logs
+    const noisePatterns = [
+      'buffer full',
+      'buffer underflow',
+      'coreaudio',
+      'Speaker drain event',
+      'Flushed'
+    ];
+
+    const shouldFilter = (text: string): boolean => {
+      return noisePatterns.some(pattern => text.includes(pattern));
+    };
+
+    // Intercept stdout (console.log, INFO level)
+    process.stdout.write = ((chunk: any, ...args: any[]): boolean => {
+      const text = chunk.toString().trim();
+      if (!text || shouldFilter(text)) return true;
+      this.addLog(text, 'info');
+      return true;
+    }) as any;
+
+    // Intercept stderr (console.error, console.warn, ERROR/WARN level)
     process.stderr.write = ((chunk: any, ...args: any[]): boolean => {
       const text = chunk.toString().trim();
-
-      // Filter out high-frequency repetitive warnings that cause jitter
-      if (text.includes('buffer full') ||
-          text.includes('buffer underflow') ||
-          text.includes('coreaudio') ||
-          text.includes('Speaker drain event') ||
-          text.includes('Flushed')) {
-        // Silently ignore these - they're too frequent and cause TUI jitter
-        return true;
-      }
-
-      // Add other logs to buffer
+      if (!text || shouldFilter(text)) return true;
       this.addLog(text, 'error');
-
-      // DO NOT write to original stderr - we're in TUI mode, everything goes to the logs panel
-      // This prevents stderr from interfering with TUI rendering
       return true;
     }) as any;
   }
 
   /**
-   * Add a log entry
+   * Write directly to terminal (bypassing interception)
+   * Use this for TUI rendering
+   */
+  private writeToTerminal(text: string): void {
+    this.originalStdoutWrite(text);
+  }
+
+  /**
+   * Sanitize log text for TUI display
+   * - Removes/escapes newlines and control characters
+   * - Collapses multi-line JSON to single line
+   * - Truncates very long strings
+   */
+  private sanitizeLogText(text: string): string {
+    if (!text) return '';
+
+    // Replace newlines and carriage returns with spaces
+    let sanitized = text.replace(/[\r\n]+/g, ' ');
+
+    // Collapse multiple spaces into one
+    sanitized = sanitized.replace(/\s+/g, ' ');
+
+    // Remove ANSI escape codes
+    sanitized = sanitized.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+
+    // Remove other control characters (except space)
+    sanitized = sanitized.replace(/[\x00-\x1f\x7f]/g, '');
+
+    // Trim whitespace
+    sanitized = sanitized.trim();
+
+    // Truncate to reasonable length (200 chars max for logs)
+    if (sanitized.length > 200) {
+      sanitized = sanitized.substring(0, 197) + '...';
+    }
+
+    return sanitized;
+  }
+
+  /**
+   * Extract log type/prefix for rate limiting
+   * Groups similar logs together (e.g., "MeetingBaas: bot.status_change")
+   */
+  private getLogTypeKey(text: string): string {
+    // Extract first part before any dynamic content
+    // Match patterns like "MeetingBaas: event_type" or "Bot: status"
+    const match = text.match(/^([^:]+:\s*[^\s,]+)/);
+    if (match) {
+      return match[1].toLowerCase();
+    }
+    // Fall back to first 30 chars
+    return text.substring(0, 30).toLowerCase();
+  }
+
+  /**
+   * Add a log entry with sanitization and rate limiting
    */
   public addLog(text: string, level: string = 'info'): void {
     if (!text || text.length === 0) return;
 
+    const now = Date.now();
+
+    // Sanitize the log text
+    const sanitized = this.sanitizeLogText(text);
+    if (!sanitized) return;
+
+    // Rate limiting - check if this type of log was recently added
+    const logKey = this.getLogTypeKey(sanitized);
+    const rateLimit = this.logRateLimits.get(logKey);
+
+    if (rateLimit) {
+      const timeSinceLastLog = now - rateLimit.lastTime;
+
+      if (timeSinceLastLog < this.LOG_RATE_LIMIT_MS) {
+        // Within rate limit window - increment counter but don't add log
+        rateLimit.count++;
+        return;
+      } else {
+        // Rate limit window passed - check if we suppressed any logs
+        if (rateLimit.count > 0) {
+          // Add a summary of suppressed logs
+          this.logsBuffer.push({
+            text: `... (${rateLimit.count} similar suppressed)`,
+            timestamp: now,
+            level: 'info'
+          });
+        }
+        // Reset counter
+        rateLimit.lastTime = now;
+        rateLimit.count = 0;
+      }
+    } else {
+      // First time seeing this log type
+      this.logRateLimits.set(logKey, { lastTime: now, count: 0 });
+    }
+
     this.logsBuffer.push({
-      text,
-      timestamp: Date.now(),
+      text: sanitized,
+      timestamp: now,
       level
     });
 
     // Keep only last MAX_LOGS entries
     if (this.logsBuffer.length > this.MAX_LOGS) {
       this.logsBuffer.shift();
+    }
+
+    // Clean up old rate limit entries (older than 10 seconds)
+    for (const [key, value] of this.logRateLimits.entries()) {
+      if (now - value.lastTime > 10000) {
+        this.logRateLimits.delete(key);
+      }
     }
   }
 
@@ -244,22 +360,22 @@ export class AudioVisualizer {
    */
   private drawBox(x: number, y: number, width: number, height: number, title?: string): void {
     // Top border - golden sand color
-    process.stdout.write(`\x1b[${y};${x}H\x1b[33m╔${"═".repeat(width - 2)}╗\x1b[0m`);
+    this.writeToTerminal(`\x1b[${y};${x}H\x1b[33m╔${"═".repeat(width - 2)}╗\x1b[0m`);
 
     // Title if provided - sunset glow
     if (title) {
       const titlePos = Math.floor((width - title.length - 2) / 2);
-      process.stdout.write(`\x1b[${y};${x + titlePos}H\x1b[1m\x1b[93m┤ ${title} ├\x1b[0m`);
+      this.writeToTerminal(`\x1b[${y};${x + titlePos}H\x1b[1m\x1b[93m┤ ${title} ├\x1b[0m`);
     }
 
     // Side borders - golden sand
     for (let i = 1; i < height - 1; i++) {
-      process.stdout.write(`\x1b[${y + i};${x}H\x1b[33m║\x1b[0m`);
-      process.stdout.write(`\x1b[${y + i};${x + width - 1}H\x1b[33m║\x1b[0m`);
+      this.writeToTerminal(`\x1b[${y + i};${x}H\x1b[33m║\x1b[0m`);
+      this.writeToTerminal(`\x1b[${y + i};${x + width - 1}H\x1b[33m║\x1b[0m`);
     }
 
     // Bottom border - golden sand
-    process.stdout.write(`\x1b[${y + height - 1};${x}H\x1b[33m╚${"═".repeat(width - 2)}╝\x1b[0m`);
+    this.writeToTerminal(`\x1b[${y + height - 1};${x}H\x1b[33m╚${"═".repeat(width - 2)}╝\x1b[0m`);
   }
 
   // Buffer for batched writes (performance optimization)
@@ -278,7 +394,7 @@ export class AudioVisualizer {
    */
   private flushWrites(): void {
     if (this.writeBuffer.length > 0) {
-      process.stdout.write(this.writeBuffer.join(""));
+      this.writeToTerminal(this.writeBuffer.join(""));
       this.writeBuffer = [];
     }
   }
@@ -326,11 +442,10 @@ export class AudioVisualizer {
       (e) => now - e.timestamp < timeWindow
     );
 
-    console.log("\x1b[1m━━━━━ Event Timeline (last 10s) ━━━━━\x1b[0m");
+    this.writeToTerminal("\x1b[1m━━━━━ Event Timeline (last 10s) ━━━━━\x1b[0m\n");
 
     if (recentEvents.length === 0) {
-      console.log("\x1b[90mWaiting for events...\x1b[0m");
-      console.log("");
+      this.writeToTerminal("\x1b[90mWaiting for events...\x1b[0m\n\n");
       return;
     }
 
@@ -358,8 +473,8 @@ export class AudioVisualizer {
           break;
       }
 
-      console.log(
-        `${event.color}${timeStr.padEnd(10)} ${icon} ${event.label.slice(0, 35).padEnd(35)} \x1b[90m${age}\x1b[0m`
+      this.writeToTerminal(
+        `${event.color}${timeStr.padEnd(10)} ${icon} ${event.label.slice(0, 35).padEnd(35)} \x1b[90m${age}\x1b[0m\n`
       );
     }
 
@@ -367,14 +482,14 @@ export class AudioVisualizer {
     if (this.lastAudioReceivedTime > 0 && this.lastTranscriptionTime > 0) {
       const latency = this.lastTranscriptionTime - this.lastAudioReceivedTime;
       if (latency > 0 && latency < 10000) {
-        console.log("");
-        console.log(
-          `\x1b[1m⏱️  Audio→Transcription Latency: \x1b[0m${latency}ms ${latency > 2000 ? "\x1b[31m⚠\x1b[0m" : "\x1b[32m✓\x1b[0m"}`
+        this.writeToTerminal("\n");
+        this.writeToTerminal(
+          `\x1b[1m⏱️  Audio→Transcription Latency: \x1b[0m${latency}ms ${latency > 2000 ? "\x1b[31m⚠\x1b[0m" : "\x1b[32m✓\x1b[0m"}\n`
         );
       }
     }
 
-    console.log("");
+    this.writeToTerminal("\n");
   }
 
   /**
@@ -432,7 +547,7 @@ export class AudioVisualizer {
     };
 
     // Clear screen (only on full redraw)
-    process.stdout.write("\x1b[2J\x1b[H");
+    this.writeToTerminal("\x1b[2J\x1b[H");
 
     const halfWidth = Math.floor(this.termWidth / 2);
     const thirdHeight = Math.floor(this.termHeight / 3);
@@ -923,7 +1038,7 @@ export class AudioVisualizer {
     this.writeAt(x, y + lineNum, `╚${"═".repeat(boxWidth - 2)}╝`, redBg);
 
     // Reset colors
-    process.stdout.write(reset);
+    this.writeToTerminal(reset);
 
     // Flush immediately so error is visible
     this.flushWrites();
@@ -963,7 +1078,7 @@ export class AudioVisualizer {
    */
   public reset(): void {
     // Clear screen completely
-    process.stdout.write("\x1b[2J\x1b[H");
+    this.writeToTerminal("\x1b[2J\x1b[H");
 
     // Reset all state
     this.audioChunkCount = 0;
@@ -977,14 +1092,52 @@ export class AudioVisualizer {
     this.audioChunkTimes = [];
 
     // Display waiting message
-    process.stdout.write("\x1b[2J\x1b[H");
+    this.writeToTerminal("\x1b[2J\x1b[H");
     const msg = "\n\n  🔌 Connection closed. Waiting for new connections...\n\n";
-    process.stdout.write(msg);
+    this.writeToTerminal(msg);
   }
 
   public cleanup(): void {
     // Show cursor again and clear screen
-    process.stdout.write("\x1b[?25h\x1b[2J\x1b[H");
-    logger.info("Audio visualizer stopped");
+    this.writeToTerminal("\x1b[?25h\x1b[2J\x1b[H");
+    // Don't log here - stdout is already restored
+  }
+
+  /**
+   * Update mode and port (called when proxy starts)
+   */
+  public setConfig(mode: string, port: number): void {
+    this.mode = mode;
+    this.port = port;
+  }
+}
+
+// Singleton instance
+let tuiInstance: AudioVisualizer | null = null;
+
+/**
+ * Initialize the TUI singleton (call at app startup)
+ */
+export function initTUI(mode: string = "Starting", port: number = 4040): AudioVisualizer {
+  if (!tuiInstance) {
+    tuiInstance = new AudioVisualizer(mode, port);
+  }
+  return tuiInstance;
+}
+
+/**
+ * Get the TUI singleton instance
+ */
+export function getTUI(): AudioVisualizer | null {
+  return tuiInstance;
+}
+
+/**
+ * Cleanup the TUI singleton
+ */
+export function cleanupTUI(): void {
+  if (tuiInstance) {
+    tuiInstance.cleanup();
+    tuiInstance = null;
   }
 }

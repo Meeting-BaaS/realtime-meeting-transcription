@@ -23,7 +23,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@meeting-baas/sdk": "^5.0.12",
+    "@meeting-baas/sdk": "^6.0.0",
     "@types/express": "5.0.6",
     "@types/node": "^18.19.130",
     "@types/ws": "^8.18.1",

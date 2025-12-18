@@ -4,6 +4,11 @@ import { proxyConfig, webhookConfig } from "./config";
 import { createLogger } from "./utils";
 import { WebhookHandler } from "./webhookHandler";
 import { initProcessLogger, closeProcessLogger } from "./processLogger";
+import { initTUI, cleanupTUI } from "./audioVisualizer";
+
+// Initialize TUI FIRST - before any logging happens
+// This ensures all console output is captured in the TUI from the start
+initTUI("Starting", proxyConfig.port);
 
 const logger = createLogger("Main");
 
@@ -18,9 +23,19 @@ let webhookHandler: WebhookHandler | null = null;
 
 type Mode = "local" | "remote";
 
+// Track if shutdown is in progress to prevent double-execution
+let isShuttingDown = false;
+
 // Graceful shutdown handler
 function setupGracefulShutdown() {
   process.on("SIGINT", async () => {
+    // Prevent double-execution
+    if (isShuttingDown) {
+      logger.info("Shutdown already in progress, ignoring duplicate SIGINT");
+      return;
+    }
+    isShuttingDown = true;
+
     logger.info("Shutting down gracefully...");
 
     // Stop webhook server
@@ -47,13 +62,14 @@ function setupGracefulShutdown() {
     const recordingInfo = proxy?.getLastRecordingInfo();
 
     // Close process logger
-    logger.info("Closing process logger...");
     closeProcessLogger();
 
-    // Display summary of stored data
+    // Cleanup TUI (restores normal console output)
+    cleanupTUI();
+
+    // Display summary of stored data (now goes to normal console)
     displayDataStorageSummary(processLogPath, transcriptInfo, recordingInfo);
 
-    logger.info("Cleanup complete, exiting...");
     process.exit(0);
   });
 }
@@ -256,11 +272,20 @@ async function main() {
       const meetingUrl = args[argIndex];
       const botName = args[argIndex + 1] || "Transcription Bot";
       const streamingUrl = args[argIndex + 2]; // Optional WebSocket streaming URL (wss://)
-      const webhookUrl = args[argIndex + 3]; // Optional webhook URL for notifications (https://)
+      let webhookUrl = args[argIndex + 3]; // Optional webhook URL for notifications (https://)
 
       if (!meetingUrl || meetingUrl.startsWith("-")) {
         logger.error("Remote mode requires a meeting URL");
         showUsage();
+      }
+
+      // Auto-derive webhook URL from streaming URL if not provided
+      if (!webhookUrl && streamingUrl) {
+        webhookUrl = streamingUrl
+          .replace("wss://", "https://")
+          .replace("ws://", "http://")
+          + "/webhooks/meetingbaas";
+        logger.info(`Auto-derived webhook URL: ${webhookUrl}`);
       }
 
       await runRemoteMode(meetingUrl, botName, streamingUrl, webhookUrl);

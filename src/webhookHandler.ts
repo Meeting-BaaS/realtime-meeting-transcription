@@ -6,6 +6,32 @@ import { createLogger } from "./utils";
 
 const logger = createLogger("WebhookHandler");
 
+// MeetingBaas webhook event interface
+export interface MeetingBaasWebhookEvent {
+  event: string;
+  data: {
+    bot_id?: string;
+    meeting_url?: string;
+    // status can be a string or an object with code (for bot.status_change events)
+    status?: string | { code?: string; message?: string; [key: string]: any };
+    recording_url?: string;
+    transcript_url?: string;
+    transcript?: {
+      text?: string;
+      words?: Array<{
+        word: string;
+        start: number;
+        end: number;
+        speaker?: string;
+      }>;
+      speakers?: string[];
+    };
+    error?: string;
+    [key: string]: any;
+  };
+  timestamp?: string;
+}
+
 export class WebhookHandler {
   private app: express.Application;
   private webhookRouter: WebhookRouter;
@@ -13,6 +39,10 @@ export class WebhookHandler {
   private eventHandlers: Map<
     string,
     (event: UnifiedWebhookEvent) => void | Promise<void>
+  > = new Map();
+  private meetingBaasHandlers: Map<
+    string,
+    (event: MeetingBaasWebhookEvent) => void | Promise<void>
   > = new Map();
 
   constructor() {
@@ -121,6 +151,39 @@ export class WebhookHandler {
         confidence: provider ? "high" : "none",
       });
     });
+
+    // MeetingBaas webhook endpoint
+    this.app.post("/webhooks/meetingbaas", async (req: Request, res: Response) => {
+      try {
+        logger.info("Received MeetingBaas webhook request");
+
+        const event = req.body as MeetingBaasWebhookEvent;
+
+        if (!event.event) {
+          logger.error("Invalid MeetingBaas webhook: missing event type");
+          return res.status(400).json({
+            error: "Invalid webhook payload",
+            details: "Missing event type",
+          });
+        }
+
+        // Process the MeetingBaas webhook event
+        await this.processMeetingBaasEvent(event);
+
+        // Acknowledge webhook receipt
+        res.status(200).json({
+          received: true,
+          provider: "meetingbaas",
+          eventType: event.event,
+        });
+      } catch (error: any) {
+        logger.error("Error processing MeetingBaas webhook:", error.message);
+        res.status(500).json({
+          error: "Internal server error",
+          details: error.message,
+        });
+      }
+    });
   }
 
   private async processWebhookEvent(event: UnifiedWebhookEvent) {
@@ -202,6 +265,103 @@ export class WebhookHandler {
   }
 
   /**
+   * Process MeetingBaas webhook events
+   */
+  private async processMeetingBaasEvent(event: MeetingBaasWebhookEvent) {
+    const { event: eventType, data } = event;
+
+    logger.info(`Processing MeetingBaas event: ${eventType}`);
+    logger.info(`  Bot ID: ${data?.bot_id || "unknown"}`);
+
+    // Handle different MeetingBaas event types
+    switch (eventType) {
+      case "bot.joining":
+        logger.info("Bot is joining the meeting...");
+        break;
+
+      case "bot.in_waiting_room":
+        logger.info("Bot is in the waiting room");
+        break;
+
+      case "bot.joined":
+        logger.info("Bot successfully joined the meeting");
+        logger.info(`  Meeting URL: ${data?.meeting_url || "unknown"}`);
+        break;
+
+      case "bot.left":
+        logger.info("Bot left the meeting");
+        break;
+
+      case "bot.recording_permission_allowed":
+        logger.info("Recording permission granted");
+        break;
+
+      case "bot.recording_permission_denied":
+        logger.warn("Recording permission denied");
+        break;
+
+      case "recording.started":
+        logger.info("Recording started");
+        break;
+
+      case "recording.ready":
+        logger.info("Recording is ready:");
+        logger.info(`  Recording URL: ${data?.recording_url || "not available"}`);
+        break;
+
+      case "recording.failed":
+        logger.error("Recording failed:");
+        logger.error(`  Error: ${data?.error || "unknown"}`);
+        break;
+
+      case "transcription.ready":
+        logger.info("Async transcription is ready:");
+        logger.info(`  Transcript URL: ${data?.transcript_url || "not available"}`);
+        if (data?.transcript?.text) {
+          const preview = data.transcript.text.substring(0, 200);
+          logger.info(`  Text preview: ${preview}...`);
+        }
+        if (data?.transcript?.speakers && data.transcript.speakers.length > 0) {
+          logger.info(`  Speakers: ${data.transcript.speakers.join(", ")}`);
+        }
+        break;
+
+      case "transcription.failed":
+        logger.error("Async transcription failed:");
+        logger.error(`  Error: ${data?.error || "unknown"}`);
+        break;
+
+      case "meeting.ended":
+        logger.info("Meeting has ended");
+        break;
+
+      default:
+        logger.info(`Unknown MeetingBaas event: ${eventType}`);
+        logger.info(`  Data: ${JSON.stringify(data, null, 2)}`);
+    }
+
+    // Call registered event handlers
+    const handler = this.meetingBaasHandlers.get(eventType);
+    if (handler) {
+      try {
+        await handler(event);
+      } catch (error: any) {
+        logger.error(`Error in MeetingBaas handler for ${eventType}:`, error.message);
+      }
+    }
+
+    // Call wildcard handler if registered
+    const wildcardHandler = this.meetingBaasHandlers.get("*");
+    if (wildcardHandler) {
+      try {
+        await wildcardHandler(event);
+      } catch (error: any) {
+        logger.error("Error in MeetingBaas wildcard handler:", error.message);
+      }
+    }
+  }
+
+  /**
    * Register a handler for specific webhook event types
    * @param eventType Event type or "*" for all events
    * @param handler Callback function to handle the event
@@ -212,6 +372,19 @@ export class WebhookHandler {
   ) {
     this.eventHandlers.set(eventType, handler);
     logger.info(`Registered handler for event type: ${eventType}`);
+  }
+
+  /**
+   * Register a handler for MeetingBaas webhook events
+   * @param eventType MeetingBaas event type (e.g., "bot.joined", "transcription.ready") or "*" for all
+   * @param handler Callback function to handle the event
+   */
+  public onMeetingBaas(
+    eventType: string,
+    handler: (event: MeetingBaasWebhookEvent) => void | Promise<void>
+  ) {
+    this.meetingBaasHandlers.set(eventType, handler);
+    logger.info(`Registered MeetingBaas handler for event type: ${eventType}`);
   }
 
   /**
@@ -227,7 +400,8 @@ export class WebhookHandler {
             logger.info(
               `Webhook server listening on ${webhookConfig.host}:${webhookConfig.port}`
             );
-            logger.info(`Webhook endpoint: ${webhookConfig.path}`);
+            logger.info(`Transcription webhook endpoint: ${webhookConfig.path}`);
+            logger.info(`MeetingBaas webhook endpoint: /webhooks/meetingbaas`);
             logger.info(
               `Signature verification: ${
                 webhookConfig.secret ? "enabled" : "disabled"
