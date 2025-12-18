@@ -594,16 +594,31 @@ export class AudioVisualizer {
       for (const log of toShow) {
         if (line >= height - 1) break;
 
-        // Color by level
+        // Color by level - check for critical errors first
         let color = "\x1b[90m";
         let icon = "ℹ️";
-        if (log.level === 'error' || log.text.includes('error') || log.text.includes('warning')) {
+
+        const textLower = log.text.toLowerCase();
+
+        // Critical errors (red) - transcription failures, session errors, API errors
+        if (textLower.includes('session is closed') ||
+            textLower.includes('duration violation') ||
+            textLower.includes('cannot send audio') ||
+            textLower.includes('websocket closed') ||
+            textLower.includes('failed to initialize') ||
+            textLower.includes('buffer underflow') ||
+            textLower.includes('coreaudio') ||
+            textLower.includes('401') ||
+            textLower.includes('deprecated') ||
+            textLower.includes('critical') ||
+            log.level === 'critical') {
+          color = "\x1b[91m"; // Bright red for critical errors
+          icon = "🔴";
+        }
+        // Regular errors/warnings (yellow)
+        else if (log.level === 'error' || textLower.includes('error') || textLower.includes('warning')) {
           color = "\x1b[33m"; // Yellow for warnings/errors
           icon = "⚠️";
-        }
-        if (log.text.includes('buffer underflow') || log.text.includes('coreaudio')) {
-          color = "\x1b[31m"; // Red for critical errors
-          icon = "❌";
         }
 
         // Truncate log text to fit
@@ -827,6 +842,34 @@ export class AudioVisualizer {
 
     // Display prominent error overlay centered on screen
     this.renderErrorOverlay(errorMessage);
+  }
+
+  /**
+   * Show a critical error that requires immediate attention
+   * Shows both in logs (red) and as an overlay
+   */
+  public showCriticalError(errorMessage: string, showOverlay: boolean = true): void {
+    if (!this.isEnabled) return;
+
+    // Add critical error to logs buffer
+    this.logsBuffer.push({
+      text: `CRITICAL: ${errorMessage}`,
+      timestamp: Date.now(),
+      level: 'critical'
+    });
+
+    // Keep only recent logs
+    if (this.logsBuffer.length > this.MAX_LOGS) {
+      this.logsBuffer.shift();
+    }
+
+    // Render dashboard to show error
+    this.renderDashboard();
+
+    // Display prominent error overlay if requested
+    if (showOverlay) {
+      this.renderErrorOverlay(errorMessage);
+    }
   }
 
   /**

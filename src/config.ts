@@ -10,6 +10,7 @@ export const botConfig = {
   port: parseInt(process.env.BOT_PORT || "8766"),
   audioParams: {
     sampleRate: 16000,
+    channels: 1,
   },
 };
 
