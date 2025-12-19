@@ -36,6 +36,8 @@ export class TranscriptLogger {
   private rawLogFilePath!: string;
   private rawLogStream: fs.WriteStream | null = null;
   private enabled: boolean;
+  private writeTimeout: NodeJS.Timeout | null = null;
+  private readonly WRITE_DEBOUNCE_MS = 1000;
 
   constructor(
     outputDir: string,
@@ -79,6 +81,11 @@ export class TranscriptLogger {
       flags: "a",
     });
 
+    this.rawLogStream.on("error", (err) => {
+      logger.error(`Raw log stream error: ${err.message}`);
+      this.rawLogStream = null;
+    });
+
     // Write session header to raw log
     this.logRaw("=".repeat(80));
     this.logRaw(`SESSION STARTED`);
@@ -99,7 +106,7 @@ export class TranscriptLogger {
    * Generate a unique session ID
    */
   private generateSessionId(): string {
-    return `session_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    return `session_${this.sessionUUID.substring(0, 8)}`;
   }
 
   /**
@@ -162,8 +169,21 @@ export class TranscriptLogger {
       : "";
     this.logRaw(`[${time}] [${type}]${speakerInfo}${confidenceInfo} ${text}`);
 
-    // Write to file after each entry (could be optimized with buffering)
-    this.writeToFile();
+    // Debounce file writes to reduce I/O
+    this.scheduleWrite();
+  }
+
+  /**
+   * Schedule a debounced write to file
+   */
+  private scheduleWrite(): void {
+    if (this.writeTimeout) {
+      clearTimeout(this.writeTimeout);
+    }
+    this.writeTimeout = setTimeout(() => {
+      this.writeToFile();
+      this.writeTimeout = null;
+    }, this.WRITE_DEBOUNCE_MS);
   }
 
   /**
@@ -184,7 +204,7 @@ export class TranscriptLogger {
     }
 
     this.metadata = { ...this.metadata, ...updates };
-    this.writeToFile();
+    this.scheduleWrite();
   }
 
   /**
@@ -238,6 +258,12 @@ export class TranscriptLogger {
   public endSession(): void {
     if (!this.enabled) {
       return;
+    }
+
+    // Cancel any pending debounced write
+    if (this.writeTimeout) {
+      clearTimeout(this.writeTimeout);
+      this.writeTimeout = null;
     }
 
     this.metadata.endTime = new Date().toISOString();
@@ -368,7 +394,10 @@ export class TranscriptLogger {
     filePath: string;
     duration: number;
     transcriptCount: number;
-  } {
+  } | null {
+    if (!this.enabled) {
+      return null;
+    }
     return {
       sessionId: this.sessionId,
       sessionUUID: this.sessionUUID,

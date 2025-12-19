@@ -3,9 +3,6 @@ import {
   GladiaAdapter,
   DeepgramAdapter,
   AssemblyAIAdapter,
-  AzureSTTAdapter,
-  OpenAIWhisperAdapter,
-  SpeechmaticsAdapter,
 } from "voice-router-dev";
 import type {
   StreamingSession,
@@ -32,6 +29,14 @@ class TranscriptionClient {
     | null = null;
   private currentProvider: StreamingProvider;
   private transcriptLogger: TranscriptLogger | null = null;
+  private lastSessionInfo: { sessionDir: string; transcriptCount: number; duration: number } | null = null;
+
+  // Only register streaming-capable adapters
+  private readonly STREAMING_ADAPTERS = [
+    { name: "gladia", Adapter: GladiaAdapter },
+    { name: "deepgram", Adapter: DeepgramAdapter },
+    { name: "assemblyai", Adapter: AssemblyAIAdapter },
+  ] as const;
 
   constructor() {
     // Initialize VoiceRouter with configured providers
@@ -54,18 +59,9 @@ class TranscriptionClient {
    * SDK will validate capabilities automatically
    */
   private registerStreamingAdapters(): void {
-    const adapters = [
-      { name: "gladia", Adapter: GladiaAdapter },
-      { name: "deepgram", Adapter: DeepgramAdapter },
-      { name: "assemblyai", Adapter: AssemblyAIAdapter },
-      { name: "azure-stt", Adapter: AzureSTTAdapter },
-      { name: "openai-whisper", Adapter: OpenAIWhisperAdapter },
-      { name: "speechmatics", Adapter: SpeechmaticsAdapter },
-    ] as const;
-
     const registeredProviders: string[] = [];
 
-    for (const { name, Adapter } of adapters) {
+    for (const { name, Adapter } of this.STREAMING_ADAPTERS) {
       if (voiceRouterConfig.providers[name]) {
         this.router.registerAdapter(new Adapter());
         registeredProviders.push(name);
@@ -141,9 +137,9 @@ class TranscriptionClient {
         );
 
         this.transcriptLogger.updateMetadata({
-          language: "en",
-          sampleRate: 16000,
-          encoding: "linear16",
+          language: proxyConfig.audioConfig.language,
+          sampleRate: proxyConfig.audioConfig.sampleRate,
+          encoding: proxyConfig.audioConfig.encoding,
         });
 
         logger.info(
@@ -222,11 +218,11 @@ class TranscriptionClient {
       this.streamingSession = await this.router.transcribeStream(
         {
           provider: selectedProvider,
-          encoding: "linear16", // SDK handles conversion to provider format
-          sampleRate: 16000,
-          language: "en",
+          encoding: proxyConfig.audioConfig.encoding,
+          sampleRate: proxyConfig.audioConfig.sampleRate,
+          language: proxyConfig.audioConfig.language,
           interimResults: true,
-          channels: 1,
+          channels: proxyConfig.audioConfig.channels,
         } as any,
         callbacks
       );
@@ -320,6 +316,12 @@ class TranscriptionClient {
     if (this.transcriptLogger) {
       this.transcriptLogger.endSession();
       const info = this.transcriptLogger.getSessionInfo();
+      // Cache session info before clearing logger
+      this.lastSessionInfo = {
+        sessionDir: info.sessionDir,
+        transcriptCount: info.transcriptCount,
+        duration: info.duration,
+      };
       logger.info(`Transcript session saved:`);
       logger.info(`  Session ID: ${info.sessionId}`);
       logger.info(`  File: ${info.filePath}`);
@@ -378,7 +380,11 @@ class TranscriptionClient {
    * Get information about the last transcript session
    */
   getLastTranscriptInfo(): { sessionDir: string; transcriptCount: number; duration: number } | null {
-    if (this.transcriptLogger && this.transcriptLogger.isEnabled()) {
+    // Return cached info if logger is null (session ended)
+    if (!this.transcriptLogger) {
+      return this.lastSessionInfo;
+    }
+    if (this.transcriptLogger.isEnabled()) {
       const info = this.transcriptLogger.getSessionInfo();
       return {
         sessionDir: info.sessionDir,

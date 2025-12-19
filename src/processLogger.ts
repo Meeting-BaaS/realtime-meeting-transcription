@@ -12,10 +12,9 @@ class ProcessLogger {
       return;
     }
 
-    // Create logs directory if it doesn't exist
-    if (!fs.existsSync(logDir)) {
-      fs.mkdirSync(logDir, { recursive: true });
-    }
+    // Synchronous filesystem operations are intentional here for initialization simplicity.
+    // This logger is created once at startup, so the brief blocking is acceptable.
+    fs.mkdirSync(logDir, { recursive: true });
 
     // Create log file with timestamp
     const timestamp = new Date().toISOString().replace(/:/g, "-").replace(/\..+/, "");
@@ -23,6 +22,12 @@ class ProcessLogger {
 
     // Create write stream
     this.logStream = fs.createWriteStream(this.logFilePath, { flags: "a" });
+
+    // Handle stream errors to prevent unhandled exceptions
+    this.logStream.on("error", (err) => {
+      console.error(`[ProcessLogger] Write stream error: ${err.message}`);
+      this.logStream = null;
+    });
 
     this.log("INFO", "Process logger initialized");
     this.log("INFO", `Log file: ${this.logFilePath}`);
@@ -37,7 +42,7 @@ class ProcessLogger {
       if (Buffer.isBuffer(data)) {
         logMessage += ` | Buffer(${data.length} bytes)`;
       } else if (typeof data === "object") {
-        logMessage += ` | ${JSON.stringify(data, null, 2)}`;
+        logMessage += ` | ${JSON.stringify(data)}`;
       } else {
         logMessage += ` | ${data}`;
       }
@@ -71,12 +76,18 @@ class ProcessLogger {
     this.log("ERROR", message, component, data);
   }
 
-  public close(): void {
-    if (this.logStream) {
-      this.log("INFO", "Process logger closing");
-      this.logStream.end();
-      this.logStream = null;
-    }
+  public close(): Promise<void> {
+    return new Promise((resolve) => {
+      if (this.logStream) {
+        this.log("INFO", "Process logger closing");
+        this.logStream.end(() => {
+          this.logStream = null;
+          resolve();
+        });
+      } else {
+        resolve();
+      }
+    });
   }
 
   public getLogFilePath(): string | undefined {
@@ -90,6 +101,8 @@ let globalProcessLogger: ProcessLogger | null = null;
 export function initProcessLogger(logDir?: string, enabled?: boolean): ProcessLogger {
   if (!globalProcessLogger) {
     globalProcessLogger = new ProcessLogger(logDir, enabled);
+  } else {
+    console.warn("[ProcessLogger] Already initialized, ignoring new parameters");
   }
   return globalProcessLogger;
 }
@@ -98,9 +111,9 @@ export function getProcessLogger(): ProcessLogger | null {
   return globalProcessLogger;
 }
 
-export function closeProcessLogger(): void {
+export async function closeProcessLogger(): Promise<void> {
   if (globalProcessLogger) {
-    globalProcessLogger.close();
+    await globalProcessLogger.close();
     globalProcessLogger = null;
   }
 }

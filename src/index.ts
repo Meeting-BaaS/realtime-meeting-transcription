@@ -1,6 +1,6 @@
 import { MeetingBaasClient } from "./meetingbaas";
 import { TranscriptionProxy } from "./proxy";
-import { proxyConfig, webhookConfig } from "./config";
+import { proxyConfig, webhookConfig, processLoggerConfig } from "./config";
 import { createLogger } from "./utils";
 import { WebhookHandler } from "./webhookHandler";
 import { initProcessLogger, closeProcessLogger } from "./processLogger";
@@ -13,7 +13,7 @@ initTUI("Starting", proxyConfig.port);
 const logger = createLogger("Main");
 
 // Initialize process logger
-const processLogger = initProcessLogger("./logs", true);
+const processLogger = initProcessLogger(processLoggerConfig.outputDir, processLoggerConfig.enabled);
 processLogger.info("Application starting", "Main");
 
 // Keep references to all our clients for cleanup

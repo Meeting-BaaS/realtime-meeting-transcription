@@ -11,7 +11,6 @@ import * as path from "path";
 import type { MeetingBaasWebhookEvent } from "./webhookHandler";
 
 const logger = createLogger("Proxy");
-const processLogger = getProcessLogger();
 
 // Speaker module loaded dynamically in initializeSpeaker() if playback is enabled
 
@@ -234,7 +233,7 @@ class TranscriptionProxy {
     this.app.post("/webhooks/meetingbaas", async (req: Request, res: Response) => {
       try {
         logger.info("Received MeetingBaas webhook");
-        processLogger?.info("Received MeetingBaas webhook", "Proxy", { body: req.body });
+        getProcessLogger()?.info("Received MeetingBaas webhook", "Proxy", { body: req.body });
 
         const event = req.body as MeetingBaasWebhookEvent;
 
@@ -270,7 +269,7 @@ class TranscriptionProxy {
     const { event: eventType, data } = event;
 
     logger.info(`MeetingBaas event: ${eventType}`);
-    processLogger?.info(`Processing MeetingBaas event: ${eventType}`, "Proxy", { data });
+    getProcessLogger()?.info(`Processing MeetingBaas event: ${eventType}`, "Proxy", { data });
 
     // Add to visualizer logs
     this.audioVisualizer.addLog(`MeetingBaas: ${eventType}`, "info");
@@ -497,6 +496,7 @@ class TranscriptionProxy {
 
     ws.on("error", (error) => {
       logger.error("Bot client error:", error);
+      this.audioVisualizer?.showError(`Bot client error: ${error.message || error}`);
     });
   }
 
@@ -563,21 +563,21 @@ class TranscriptionProxy {
           // Likely audio data, send to transcription provider
           const audioBuffer = Buffer.isBuffer(message) ? message : Buffer.from(message);
 
-          processLogger?.debug(
+          getProcessLogger()?.debug(
             `Received audio chunk from MeetingBaas`,
             "Proxy",
             { size: audioBuffer.length, isGladiaActive: this.isGladiaSessionActive }
           );
 
           if (this.isGladiaSessionActive) {
-            processLogger?.debug(`Sending audio chunk to Gladia`, "Proxy", { size: audioBuffer.length });
+            getProcessLogger()?.debug(`Sending audio chunk to Gladia`, "Proxy", { size: audioBuffer.length });
             this.gladiaClient.sendAudioChunk(audioBuffer).catch((error) => {
               logger.error("❌ Error sending audio chunk to transcription:", error);
-              processLogger?.error(`Failed to send audio chunk to Gladia`, "Proxy", { error: error.message });
+              getProcessLogger()?.error(`Failed to send audio chunk to Gladia`, "Proxy", { error: error.message });
             });
           } else {
             logger.warn(`⚠️ Transcription session not active yet, dropping audio chunk`);
-            processLogger?.warn(`Gladia session not active, dropping audio chunk`, "Proxy");
+            getProcessLogger()?.warn(`Gladia session not active, dropping audio chunk`, "Proxy");
           }
 
           // Update audio visualizer (no buffering, so buffer pressure always 0)
@@ -630,6 +630,7 @@ class TranscriptionProxy {
 
     ws.on("error", (error) => {
       logger.error("MeetingBaas client error:", error);
+      this.audioVisualizer?.showError(`MeetingBaas client error: ${error.message || error}`);
     });
   }
 
@@ -673,8 +674,8 @@ class TranscriptionProxy {
         console.error("╚════════════════════════════════════════════════════════════════╝");
         console.error("\n");
 
-        // Show error in TUI
-        this.audioVisualizer?.showError(displayMsg);
+        // Show critical error in TUI (this is fatal - bot will exit)
+        this.audioVisualizer?.showCriticalError(displayMsg);
 
         // Gracefully shutdown
         this.handleTranscriptionError();
@@ -700,7 +701,7 @@ class TranscriptionProxy {
       console.error("╚════════════════════════════════════════════════════════════════╝");
       console.error("\n");
 
-      this.audioVisualizer?.showError(displayMsg);
+      this.audioVisualizer?.showCriticalError(displayMsg);
       this.handleTranscriptionError();
     });
   }

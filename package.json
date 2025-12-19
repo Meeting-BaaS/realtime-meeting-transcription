@@ -8,10 +8,10 @@
     "postinstall": "pnpm run rebuild:speaker",
     "build": "tsup src/index.ts --dts",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts --remote",
+    "dev": "npm run remote",
     "remote": "ts-node src/index.ts --remote",
     "dev:local": "ts-node src/index.ts --local",
-    "dev:remote": "ts-node src/index.ts --remote",
+    "dev:remote": "npm run remote",
     "clean": "rm -rf node_modules && pnpm install"
   },
   "keywords": [
@@ -24,9 +24,6 @@
   "license": "MIT",
   "dependencies": {
     "@meeting-baas/sdk": "^6.0.0",
-    "@types/express": "5.0.6",
-    "@types/node": "^18.19.130",
-    "@types/ws": "^8.18.1",
     "axios": "^1.13.2",
     "dotenv": "^16.6.1",
     "express": "5.2.1",
@@ -37,6 +34,9 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
+    "@types/express": "5.0.6",
+    "@types/node": "^18.19.130",
+    "@types/ws": "^8.18.1",
     "node-gyp": "^12.1.0",
     "tsup": "^6.7.0"
   }

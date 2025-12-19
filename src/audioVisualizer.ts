@@ -989,8 +989,10 @@ export class AudioVisualizer {
 
   /**
    * Render a prominent error overlay that's impossible to miss
+   * @param errorMessage - The error message to display
+   * @param willExit - If true, shows "Bot will exit in 3 seconds...", otherwise shows "Please check the logs for details."
    */
-  private renderErrorOverlay(errorMessage: string): void {
+  private renderErrorOverlay(errorMessage: string, willExit: boolean = false): void {
     const boxWidth = Math.min(80, this.termWidth - 10);
     const boxHeight = 10;
     const x = Math.floor((this.termWidth - boxWidth) / 2);
@@ -1028,8 +1030,8 @@ export class AudioVisualizer {
     this.writeAt(x, y + lineNum, `${vBorder}${" ".repeat(boxWidth - 2)}${vBorder}`, redBg);
     lineNum++;
 
-    // Shutdown message
-    const shutdownMsg = "Bot will exit in 3 seconds...";
+    // Footer message - configurable based on whether bot will exit
+    const shutdownMsg = willExit ? "Bot will exit in 3 seconds..." : "Please check the logs for details.";
     const shutdownPadding = Math.floor((boxWidth - shutdownMsg.length - 2) / 2);
     this.writeAt(x, y + lineNum, `${vBorder}${" ".repeat(shutdownPadding)}${shutdownMsg}${" ".repeat(boxWidth - shutdownPadding - shutdownMsg.length - 2)}${vBorder}`, redBg);
     lineNum++;

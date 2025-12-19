@@ -23,6 +23,12 @@ export const proxyConfig = {
     sampleRate: 16000, // Match bot's streaming_audio_frequency and Gladia requirements
     channels: 1,
   },
+  audioConfig: {
+    encoding: (process.env.AUDIO_ENCODING as "linear16" | "pcm_s16le" | "mulaw" | "alaw") || "linear16",
+    sampleRate: parseInt(process.env.AUDIO_SAMPLE_RATE || "16000"),
+    language: process.env.AUDIO_LANGUAGE || "en",
+    channels: parseInt(process.env.AUDIO_CHANNELS || "1"),
+  },
   recording: {
     enabled: process.env.ENABLE_AUDIO_RECORDING === "true",
     outputDir: process.env.AUDIO_OUTPUT_DIR || "./recordings",
@@ -54,6 +60,28 @@ export const apiUrls = {
   meetingBaasWebhook: process.env.MEETING_BAAS_WEBHOOK_URL || undefined,
 };
 
+// Valid transcription providers
+const VALID_PROVIDERS = ["gladia", "deepgram", "assemblyai", "azure-stt", "openai-whisper", "speechmatics"] as const;
+type ValidProvider = typeof VALID_PROVIDERS[number];
+
+function getValidProvider(envValue: string | undefined, fallback: ValidProvider): ValidProvider {
+  if (envValue && VALID_PROVIDERS.includes(envValue as ValidProvider)) {
+    return envValue as ValidProvider;
+  }
+  return fallback;
+}
+
+// Valid selection strategies
+const VALID_STRATEGIES = ["explicit", "default", "round-robin"] as const;
+type ValidStrategy = typeof VALID_STRATEGIES[number];
+
+function getValidStrategy(envValue: string | undefined, fallback: ValidStrategy): ValidStrategy {
+  if (envValue && VALID_STRATEGIES.includes(envValue as ValidStrategy)) {
+    return envValue as ValidStrategy;
+  }
+  return fallback;
+}
+
 // VoiceRouter configuration
 export const voiceRouterConfig = {
   providers: {
@@ -81,11 +109,8 @@ export const voiceRouterConfig = {
       speechmatics: { apiKey: apiKeys.speechmatics },
     }),
   },
-  defaultProvider:
-    (process.env.TRANSCRIPTION_PROVIDER as any) || "gladia",
-  selectionStrategy:
-    (process.env.PROVIDER_STRATEGY as "explicit" | "default" | "round-robin") ||
-    "default",
+  defaultProvider: getValidProvider(process.env.TRANSCRIPTION_PROVIDER, "gladia"),
+  selectionStrategy: getValidStrategy(process.env.PROVIDER_STRATEGY, "default"),
 };
 
 // Webhook configuration
@@ -94,7 +119,18 @@ export const webhookConfig = {
   port: parseInt(process.env.WEBHOOK_PORT || "5050"),
   host: process.env.WEBHOOK_HOST || "0.0.0.0",
   path: process.env.WEBHOOK_PATH || "/webhooks/transcription",
-  secret: process.env.WEBHOOK_SECRET || "",
+  secret: process.env.WEBHOOK_SECRET,
+};
+
+// Warn if webhooks enabled without secret
+if (webhookConfig.enabled && !webhookConfig.secret) {
+  console.warn("⚠️  WARNING: Webhooks enabled without WEBHOOK_SECRET - requests will not be authenticated");
+}
+
+// Process logger configuration
+export const processLoggerConfig = {
+  enabled: process.env.ENABLE_PROCESS_LOGGING !== "false", // Enabled by default
+  outputDir: process.env.PROCESS_LOG_DIR || "./logs",
 };
 
 if (!apiKeys.meetingBaas) {

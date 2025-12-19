@@ -1,4 +1,5 @@
 import express, { Request, Response } from "express";
+import * as http from "http";
 import { WebhookRouter } from "voice-router-dev";
 import type { UnifiedWebhookEvent } from "voice-router-dev";
 import { webhookConfig } from "./config";
@@ -35,7 +36,7 @@ export interface MeetingBaasWebhookEvent {
 export class WebhookHandler {
   private app: express.Application;
   private webhookRouter: WebhookRouter;
-  private server: any;
+  private server: http.Server | null = null;
   private eventHandlers: Map<
     string,
     (event: UnifiedWebhookEvent) => void | Promise<void>
@@ -115,8 +116,16 @@ export class WebhookHandler {
             logger.info(`Transcription ID: ${result.event.data.id}`);
           }
 
+          // Ensure event exists before processing
+          if (!result.event) {
+            logger.error("Webhook routing succeeded but event is undefined");
+            return res.status(400).json({
+              error: "Invalid webhook event",
+            });
+          }
+
           // Process the webhook event
-          await this.processWebhookEvent(result.event!);
+          await this.processWebhookEvent(result.event);
 
           // Acknowledge webhook receipt
           res.status(200).json({
@@ -202,7 +211,8 @@ export class WebhookHandler {
         logger.info(`  Confidence: ${data?.confidence || "unknown"}`);
 
         if (data?.text) {
-          logger.info(`  Text preview: ${data.text.substring(0, 100)}...`);
+          const preview = data.text.length > 100 ? `${data.text.substring(0, 100)}...` : data.text;
+          logger.info(`  Text preview: ${preview}`);
         }
 
         if (data?.summary) {
@@ -217,7 +227,7 @@ export class WebhookHandler {
       case "transcription.failed":
         logger.error("Transcription failed:");
         logger.error(`  ID: ${data?.id}`);
-        logger.error(`  Error: ${data?.error || event.data?.error}`);
+        logger.error(`  Error: ${data?.error}`);
         break;
 
       case "transcription.processing":
@@ -318,8 +328,8 @@ export class WebhookHandler {
         logger.info("Async transcription is ready:");
         logger.info(`  Transcript URL: ${data?.transcript_url || "not available"}`);
         if (data?.transcript?.text) {
-          const preview = data.transcript.text.substring(0, 200);
-          logger.info(`  Text preview: ${preview}...`);
+          const preview = data.transcript.text.length > 200 ? `${data.transcript.text.substring(0, 200)}...` : data.transcript.text;
+          logger.info(`  Text preview: ${preview}`);
         }
         if (data?.transcript?.speakers && data.transcript.speakers.length > 0) {
           logger.info(`  Speakers: ${data.transcript.speakers.join(", ")}`);
