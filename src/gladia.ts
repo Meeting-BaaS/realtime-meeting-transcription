@@ -142,9 +142,10 @@ class TranscriptionClient {
           encoding: proxyConfig.audioConfig.encoding,
         });
 
-        logger.info(
-          `Transcript logging enabled: ${this.transcriptLogger.getSessionInfo().filePath}`
-        );
+        const sessionInfo = this.transcriptLogger.getSessionInfo();
+        if (sessionInfo) {
+          logger.info(`Transcript logging enabled: ${sessionInfo.filePath}`);
+        }
       }
 
       // Start streaming session with VoiceRouter (SDK validates capabilities)
@@ -316,17 +317,19 @@ class TranscriptionClient {
     if (this.transcriptLogger) {
       this.transcriptLogger.endSession();
       const info = this.transcriptLogger.getSessionInfo();
-      // Cache session info before clearing logger
-      this.lastSessionInfo = {
-        sessionDir: info.sessionDir,
-        transcriptCount: info.transcriptCount,
-        duration: info.duration,
-      };
-      logger.info(`Transcript session saved:`);
-      logger.info(`  Session ID: ${info.sessionId}`);
-      logger.info(`  File: ${info.filePath}`);
-      logger.info(`  Duration: ${info.duration.toFixed(2)}s`);
-      logger.info(`  Transcripts: ${info.transcriptCount}`);
+      if (info) {
+        // Cache session info before clearing logger
+        this.lastSessionInfo = {
+          sessionDir: info.sessionDir,
+          transcriptCount: info.transcriptCount,
+          duration: info.duration,
+        };
+        logger.info(`Transcript session saved:`);
+        logger.info(`  Session ID: ${info.sessionId}`);
+        logger.info(`  File: ${info.filePath}`);
+        logger.info(`  Duration: ${info.duration.toFixed(2)}s`);
+        logger.info(`  Transcripts: ${info.transcriptCount}`);
+      }
       this.transcriptLogger = null;
     }
   }
@@ -386,11 +389,13 @@ class TranscriptionClient {
     }
     if (this.transcriptLogger.isEnabled()) {
       const info = this.transcriptLogger.getSessionInfo();
-      return {
-        sessionDir: info.sessionDir,
-        transcriptCount: info.transcriptCount,
-        duration: info.duration,
-      };
+      if (info) {
+        return {
+          sessionDir: info.sessionDir,
+          transcriptCount: info.transcriptCount,
+          duration: info.duration,
+        };
+      }
     }
     return null;
   }
