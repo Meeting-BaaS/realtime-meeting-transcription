@@ -402,11 +402,13 @@ export class WebhookHandler {
             );
             logger.info(`Transcription webhook endpoint: ${webhookConfig.path}`);
             logger.info(`MeetingBaas webhook endpoint: /webhooks/meetingbaas`);
-            logger.info(
-              `Signature verification: ${
-                webhookConfig.secret ? "enabled" : "disabled"
-              }`
-            );
+            if (!webhookConfig.secret) {
+              logger.warn(
+                "Webhook server running without signature verification. Set WEBHOOK_SECRET for production use."
+              );
+            } else {
+              logger.info("Signature verification: enabled");
+            }
             resolve();
           }
         );
